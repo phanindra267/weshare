@@ -1,0 +1,38 @@
+# WeShare local development infrastructure.
+#
+# Starts PostgreSQL only. The Go API and Next.js app run on the host during
+# development so they can reload quickly. No paid services are required.
+#
+# Usage (from this directory):
+#   docker compose up -d
+#   docker compose down          # keep data
+#   docker compose down -v       # DESTROY the local database volume
+
+name: weshare
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: weshare-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-weshare}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-weshare}
+      POSTGRES_DB: ${POSTGRES_DB:-weshare}
+      # Deterministic collation for local development.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - weshare_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-weshare} -d ${POSTGRES_DB:-weshare}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+volumes:
+  weshare_pgdata:
+    name: weshare_pgdata

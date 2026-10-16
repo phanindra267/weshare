@@ -1,0 +1,165 @@
+openapi: 3.1.0
+info:
+  title: WeShare API
+  version: 0.1.0
+  description: >
+    REST API for WeShare, a local-first communication, social, and mini-app
+    platform. This document is the source of truth for client/server contracts.
+    It grows as phases are implemented; endpoints listed here are actually
+    implemented and tested.
+servers:
+  - url: http://localhost:8080
+    description: Local development
+
+tags:
+  - name: System
+    description: Health and readiness probes.
+
+paths:
+  /healthz:
+    get:
+      tags: [System]
+      summary: Liveness probe
+      description: >
+        Reports that the process is running. Does not touch dependencies.
+        Response is a bare object (not wrapped in the `data` envelope).
+      operationId: healthz
+      responses:
+        "200":
+          description: Service is alive.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+        "500":
+          $ref: "#/components/responses/Error"
+
+  /readyz:
+    get:
+      tags: [System]
+      summary: Readiness probe
+      description: >
+        Reports whether the service can serve traffic, which requires a
+        reachable database. Returns 503 when a dependency is unavailable.
+      operationId: readyz
+      responses:
+        "200":
+          description: All dependencies are available.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ready"
+        "503":
+          description: One or more dependencies are unavailable.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Ready"
+
+  /api/v1/ping:
+    get:
+      tags: [System]
+      summary: Authenticated-surface smoke test
+      description: Returns a wrapped `data` envelope, used to verify the versioned API.
+      operationId: ping
+      responses:
+        "200":
+          description: Pong.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  data:
+                    type: object
+                    properties:
+                      pong:
+                        type: boolean
+                      time:
+                        type: string
+                        format: date-time
+                    required: [pong, time]
+                required: [data]
+        "500":
+          $ref: "#/components/responses/Error"
+
+components:
+  responses:
+    Error:
+      description: >
+        Standard error envelope. `code` is a stable machine-readable string;
+        `message` is safe to display; `request_id` correlates with logs.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorEnvelope"
+
+  schemas:
+    Health:
+      type: object
+      properties:
+        status:
+          type: string
+          const: ok
+        service:
+          type: string
+          example: weshare-api
+        version:
+          type: string
+          example: dev
+        uptime_seconds:
+          type: number
+      required: [status, service, version, uptime_seconds]
+
+    Ready:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [ready, not_ready]
+        checks:
+          type: object
+          additionalProperties:
+            type: string
+            enum: [ok, error]
+      required: [status, checks]
+
+    ErrorEnvelope:
+      type: object
+      properties:
+        error:
+          $ref: "#/components/schemas/ErrorBody"
+      required: [error]
+
+    ErrorBody:
+      type: object
+      properties:
+        code:
+          type: string
+          example: VALIDATION_ERROR
+        message:
+          type: string
+          example: The submitted request is invalid
+        request_id:
+          type: string
+        details:
+          description: Optional structured, client-safe details.
+      required: [code, message]
+
+    DataEnvelope:
+      description: Standard wrapper for successful single-resource responses.
+      type: object
+      properties:
+        data: {}
+      required: [data]
+
+    CursorPage:
+      description: Cursor-paginated list envelope.
+      type: object
+      properties:
+        items:
+          type: array
+          items: {}
+        next_cursor:
+          type: [string, "null"]
+      required: [items, next_cursor]
