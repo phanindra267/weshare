@@ -3,6 +3,7 @@ import "./globals.css";
 import { ToastProvider } from "@/components/ui/Toast";
 import { AuthProvider } from "@/features/auth/AuthProvider";
 import { AppHeader } from "@/components/layout/AppHeader";
+import { PresenceHeartbeat } from "@/features/presence/PresenceHeartbeat";
 
 export const metadata: Metadata = {
   title: {
@@ -44,6 +45,7 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         <ToastProvider>
           <AuthProvider>
             <AppHeader />
+            <PresenceHeartbeat />
             {children}
           </AuthProvider>
         </ToastProvider>
