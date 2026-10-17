@@ -74,7 +74,7 @@ with Phase 1.
 
 ## Conclusion
 
-Phase 0 (foundation) and Phase 1 (Authentication, Accounts, and Profiles) are
-complete and verified — see `docs/PHASE_STATUS.md` for actual test results. The
-codebase is ready to proceed to Phase 2 (Contacts and Presence); the ordered
-plan lives in `docs/NEXT_STEPS.md`.
+Phases 0 (foundation) through 3 (one-to-one real-time messaging) are complete
+and verified — see `docs/PHASE_STATUS.md` for actual test results. The codebase
+is ready to proceed to Phase 4 (Groups, Media, Voice); the ordered plan lives in
+`docs/NEXT_STEPS.md`.

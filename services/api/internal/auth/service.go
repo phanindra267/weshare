@@ -42,9 +42,9 @@ func NewService(store *Store, cfg *config.Config) *Service {
 		store:           store,
 		cfg:             cfg,
 		dummyHash:       dummy,
-		loginLimiter:    NewLimiter(30, 15*time.Minute),
-		registerLimiter: NewLimiter(10, time.Hour),
-		passwordLimiter: NewLimiter(10, time.Hour),
+		loginLimiter:    NewLimiter(cfg.LoginRateLimit, cfg.LoginRateWindow),
+		registerLimiter: NewLimiter(cfg.RegisterRateLimit, cfg.RegisterRateWindow),
+		passwordLimiter: NewLimiter(cfg.PasswordRateLimit, cfg.PasswordRateWindow),
 	}
 }
 

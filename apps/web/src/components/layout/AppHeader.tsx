@@ -31,6 +31,12 @@ export function AppHeader() {
           {status === "authenticated" && user ? (
             <>
               <Link
+                href="/messages"
+                className="text-ink-muted hover:text-ink text-sm"
+              >
+                Messages
+              </Link>
+              <Link
                 href="/contacts"
                 className="text-ink-muted hover:text-ink text-sm"
               >

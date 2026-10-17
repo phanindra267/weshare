@@ -63,13 +63,24 @@ type Config struct {
 	LockoutDuration   time.Duration
 	MinPasswordLength int
 
+	// Auth endpoint rate limits, keyed on client IP. Configurable so test
+	// suites that create many accounts can raise them without weakening the
+	// production defaults.
+	LoginRateLimit     int
+	LoginRateWindow    time.Duration
+	RegisterRateLimit  int
+	RegisterRateWindow time.Duration
+	PasswordRateLimit  int
+	PasswordRateWindow time.Duration
+
 	// Presence: a user counts as online until this long after their last
 	// heartbeat. Derived on read rather than trusting the stored flag.
 	PresenceStaleAfter time.Duration
 
 	// Media storage.
-	StorageDir     string
-	MaxAvatarBytes int64
+	StorageDir         string
+	MaxAvatarBytes     int64
+	MaxAttachmentBytes int64
 
 	LogLevel  string
 	LogFormat string
@@ -125,10 +136,18 @@ func Load(version string) (*Config, error) {
 		LockoutDuration:   getDuration("LOCKOUT_DURATION", 15*time.Minute),
 		MinPasswordLength: getInt("MIN_PASSWORD_LENGTH", 8),
 
+		LoginRateLimit:     getInt("LOGIN_RATE_LIMIT", 30),
+		LoginRateWindow:    getDuration("LOGIN_RATE_WINDOW", 15*time.Minute),
+		RegisterRateLimit:  getInt("REGISTER_RATE_LIMIT", 10),
+		RegisterRateWindow: getDuration("REGISTER_RATE_WINDOW", time.Hour),
+		PasswordRateLimit:  getInt("PASSWORD_RATE_LIMIT", 10),
+		PasswordRateWindow: getDuration("PASSWORD_RATE_WINDOW", time.Hour),
+
 		PresenceStaleAfter: getDuration("PRESENCE_STALE_AFTER", 60*time.Second),
 
-		StorageDir:     getenv("STORAGE_DIR", "./storage"),
-		MaxAvatarBytes: int64(getInt("MAX_AVATAR_BYTES", 2*1024*1024)),
+		StorageDir:         getenv("STORAGE_DIR", "./storage"),
+		MaxAvatarBytes:     int64(getInt("MAX_AVATAR_BYTES", 2*1024*1024)),
+		MaxAttachmentBytes: int64(getInt("MAX_ATTACHMENT_BYTES", 10*1024*1024)),
 
 		LogLevel:  strings.ToLower(getenv("LOG_LEVEL", "info")),
 		LogFormat: strings.ToLower(getenv("LOG_FORMAT", "json")),
@@ -210,6 +229,22 @@ func (c *Config) validate() error {
 	if c.LockoutDuration <= 0 {
 		problems = append(problems, "LOCKOUT_DURATION must be a positive duration")
 	}
+	for _, rl := range []struct {
+		name  string
+		limit int
+		win   time.Duration
+	}{
+		{"LOGIN_RATE", c.LoginRateLimit, c.LoginRateWindow},
+		{"REGISTER_RATE", c.RegisterRateLimit, c.RegisterRateWindow},
+		{"PASSWORD_RATE", c.PasswordRateLimit, c.PasswordRateWindow},
+	} {
+		if rl.limit < 1 {
+			problems = append(problems, rl.name+"_LIMIT must be at least 1")
+		}
+		if rl.win <= 0 {
+			problems = append(problems, rl.name+"_WINDOW must be a positive duration")
+		}
+	}
 	if c.PresenceStaleAfter <= 0 {
 		problems = append(problems, "PRESENCE_STALE_AFTER must be a positive duration")
 	}
@@ -219,6 +254,9 @@ func (c *Config) validate() error {
 	}
 	if c.MaxAvatarBytes <= 0 {
 		problems = append(problems, "MAX_AVATAR_BYTES must be positive")
+	}
+	if c.MaxAttachmentBytes <= 0 {
+		problems = append(problems, "MAX_ATTACHMENT_BYTES must be positive")
 	}
 
 	if c.IsProduction() && len(c.CORSAllowedOrigins) == 0 {

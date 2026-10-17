@@ -1,69 +1,81 @@
 # Next Steps
 
-**Current phase:** Phase 1 — Authentication, Accounts, and Profiles (Verified)  
-**Next phase:** Phase 2 — Contacts and Presence
+**Current phase:** Phase 3 — One-to-One Real-Time Messaging (Verified)
+**Next phase:** Phase 4 — Groups, Media, Voice
 
-Phase 0 (foundation) and Phase 1 (auth/accounts/profiles) are both implemented
-and verified. See `docs/PHASE_STATUS.md` for the actual test results.
+Phases 0–3 are implemented and verified. See `docs/PHASE_STATUS.md` for actual,
+reproducible test results — including two live backend harnesses (38/0 and 50/0)
+and a Playwright browser E2E (1/1).
 
-## Immediate housekeeping (before starting Phase 2)
+## Immediate housekeeping
 
-1. **`go mod tidy`** in `services/api` — drops the unused `github.com/alexedwards/scs/v2`
-   dependency (manual DB-backed sessions were chosen instead).
-2. **Unit tests for `internal/users`** — currently exercised only by live E2E curl
-   checks; add handler/store tests for `GET/PATCH /me`, avatar upload validation,
-   and `GET /users/:id` 404s.
-3. **Playwright browser install + first E2E** — `npx playwright install` (deferred so
-   far); add one smoke flow: register → land on `/profile` → change name → logout.
-4. **Docs completion** — fill `docs/API.md` (auth + profile endpoints),
-   `docs/SECURITY.md` (Argon2id params, session/cookie/CSRF/rate-limit design),
-   `docs/DATABASE.md` (users/credentials/sessions schema), and update `README.md`
-   (currently still says "Phase 0 is Verified").
+1. **Commit Phase 3** — the Go backend (`internal/messaging`, `internal/realtime`),
+   migration `000007_messaging`, the web feature (`features/messaging`, `/messages`),
+   updated contracts, and these docs. Do not commit before the gates below pass.
+2. **Re-run the full gate set** before committing:
+   - `services/api`: `go build ./...`, `go vet ./...`, `gofmt -l .`, `go test ./...`
+   - `apps/web`: `npm run lint`, `npm run typecheck`, `npm test`, `npm run build`,
+     `npm run e2e` (needs the API on `:8080` and Chromium installed once via
+     `npx playwright install chromium`)
+3. **`users` package tests** — still exercised only indirectly; add handler/store
+   tests for `GET/PATCH /me`, avatar upload validation, and `GET /users/:id` 404s.
 
-## Phase 2 — Contacts and Presence (ordered plan)
+## Phase 4 — Groups, Media, Voice (ordered plan)
 
-Phase roadmap reference: `docs/IMPLEMENTATION_AUDIT.md` ("Phases 1-16").
+Roadmap reference: `docs/IMPLEMENTATION_AUDIT.md` ("Missing / planned by phase").
+The conversation model already distinguishes `kind = direct | group`, and the
+message schema already reserves `image | file | audio` plus `edited_at`/
+`deleted_at`, so Phase 4 extends rather than reworks.
 
 1. **Schema**
-   - Migration `000006_contacts`: contacts / friend requests (requester_id,
-     addressee_id, status pending|accepted|blocked, timestamps, unique pair).
-   - Presence columns already exist on `users` (`online`, `last_seen_at`) — add a
-     heartbeat-driven update path rather than a new table unless needed.
-   - Down migrations for all.
+   - Migration `000008_groups`: conversation `title`/`avatar_url` for groups,
+     `conversation_members.role` (`owner|admin|member`) with defaults, and any
+     needed indexes. Down migration included.
+   - No new message tables needed (media reuses `message_type`).
 2. **Backend**
-   - Repositories + services for contact CRUD, accept/decline/undo requests,
-     and block/unblock with the same generic error style (no enumeration leaks).
-   - Presence: `POST /api/v1/presence/heartbeat` (auth) updating `last_seen_at`,
-     and derive `online` from a short staleness window; public exposure rules per
-     profile privacy.
-   - Endpoints: `GET/POST/DELETE /api/v1/contacts`, `GET /api/v1/contacts/requests`,
-     `POST /api/v1/contacts/requests/:id/{accept,decline}`, `POST /api/v1/users/:id/block`.
-   - Rate-limit write endpoints; reuse the existing in-memory `Limiter`.
-   - Preserve the existing envelopes, request-ID, and CSRF conventions.
+   - Group lifecycle: create group (with initial members), add/remove members,
+     leave, promote/demote, rename, set group avatar — owner/admin guarded.
+   - Authorization: extend `Store.CanMessage`/membership checks for groups; keep
+     the existing `404`-on-non-member behaviour.
+   - System messages for membership changes (`message_type = system`, currently
+     server-only and rejected from clients).
+   - Media messages: upload endpoint(s) returning a `url`, then send
+     `image|file|audio` messages referencing it; reuse `internal/media` storage
+     and content sniffing.
+   - Extend realtime events: `conversation.updated` / `member.changed` (group
+     metadata + membership) and reuse `message.created` fan-out to all members.
+   - Read/delivery semantics already per-member; verify they hold for >2 members
+     (unread counts, receipts) and adjust fan-out where needed.
 3. **Frontend**
-   - `features/contacts` API client + types, contacts/requests screens, presence
-     badges on profile & list rows, toasts for request actions.
-   - Wire into `AppHeader` / a nav entry; reuse `RequireAuth` for gated routes.
+   - Group creation flow, member management, group info panel, system messages,
+     and media attachments (upload + preview) in the composer and message list.
+   - Extend `features/messaging` rather than adding a parallel feature; keep the
+     optimistic-send/`client_msg_id` retry and reconnect `sync` behaviour.
 4. **Tests**
-   - Backend: request/accept/block flows, privacy of `online`/`last_seen_at`,
-     auth-gated endpoints, rate limits.
-   - Frontend: contacts list state, request accept/decline UI, form errors.
+   - Backend: group create/add/remove/leave/role rules, non-member access, system
+     messages, media validation, multi-member read/delivery.
+   - Frontend: group flows and media rendering; extend Vitest suite.
+   - Live: extend the Playwright E2E to a 3-user group with an image message.
 5. **Docs & tracking**
-   - Update `docs/PHASE_STATUS.md` (Phase 2 acceptance table + real results),
-     `docs/NEXT_STEPS.md` (advance to Phase 3), `packages/contracts/openapi.yaml`,
-     and `packages/contracts/websocket-events.md` if presence events are defined
-     (the realtime layer itself lands in Phase 3).
+   - Update `docs/PHASE_STATUS.md` (Phase 4 acceptance table + real results),
+     `docs/NEXT_STEPS.md` (advance to Phase 5 — Moments/social/Discover), and the
+     contracts (`openapi.yaml`, `websocket-events.md`).
 
 ## Deferred / notes
 
-- Email/SMS verification: development-only adapter; never simulate fake delivery
-  unless explicitly tracked.
-- Rate limiting is in-memory per IP — documented as dev-only (not distributed).
+- Message editing and deletion have schema/contract placeholders but no write
+  path; schedule with the relevant phase.
+- `sync.result` paginates 200 messages at a time; the client should loop on the
+  returned cursor for very large backlogs (currently a single page per reconnect).
+- Email/SMS verification: development-only adapter; never simulate fake delivery.
+- Rate limiting is in-memory per IP/user — dev-only (not distributed).
 - Transitive dev-only npm advisory (braces/micromatch) noted; not runtime.
 
 ## Verification
 
-Before marking Phase 2 complete: two accounts can find each other, send/accept a
-request, block/unblock; presence reflects a heartbeat and decays when idle;
-protected endpoints still reject unauthenticated calls; all Go/web tests, lint,
-typecheck, and builds pass; `PHASE_STATUS.md` records actual results.
+Before marking Phase 4 complete: a group can be created, members added/removed
+with correct role enforcement, membership changes surface as system messages, an
+image/file/audio message sends and renders end to end, multi-member unread and
+read receipts are correct, protected endpoints still reject unauthenticated
+calls, all Go/web gates and both live harnesses pass, and `docs/PHASE_STATUS.md`
+records actual results.

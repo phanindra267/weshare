@@ -114,12 +114,12 @@ Migrations are embedded in `services/api/migrations/*.sql` and executed via the 
 
 - `docs/IMPLEMENTATION_AUDIT.md` — current state inventory
 - `docs/PHASE_STATUS.md` — per-phase status + test results
-- `docs/NEXT_STEPS.md` — concrete next actions (Phase 2)
+- `docs/NEXT_STEPS.md` — concrete next actions (Phase 4)
 - `docs/ARCHITECTURE.md`, `docs/DATABASE.md`, `docs/API.md`, `docs/SECURITY.md`, `docs/TESTING.md`, `docs/DEPLOYMENT.md`, `docs/LOCAL_SETUP.md` — living documentation
 
 ## Implementation status
 
-Phases 0 (Foundation) and 1 (Authentication, Accounts, and Profiles) are **Verified**. See `docs/PHASE_STATUS.md` for actual test results and `docs/NEXT_STEPS.md` for the Phase 2 (contacts & presence) plan.
+Phases 0 (Foundation), 1 (Authentication, Accounts, and Profiles), 2 (Contacts and Presence), and 3 (One-to-One Real-Time Messaging) are **Verified**. See `docs/PHASE_STATUS.md` for actual test results and `docs/NEXT_STEPS.md` for the Phase 4 (groups, media, voice) plan.
 
 ## Legal / notes
 

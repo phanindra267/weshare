@@ -100,3 +100,124 @@ func TestRemove(t *testing.T) {
 		t.Fatalf("Remove missing should not error: %v", err)
 	}
 }
+
+func gifBytes(n int) []byte {
+	sig := []byte("GIF89a")
+	buf := make([]byte, n)
+	copy(buf, sig)
+	return buf
+}
+
+func wavBytes(n int) []byte {
+	// RIFF....WAVE header; DetectContentType recognizes the signature.
+	buf := make([]byte, n)
+	copy(buf, []byte("RIFF"))
+	if n > 12 {
+		copy(buf[8:], []byte("WAVE"))
+	}
+	return buf
+}
+
+func TestSaveAttachmentImage(t *testing.T) {
+	s := newTestStorage(t)
+	rel, contentType, kind, size, err := s.SaveAttachment("a1", bytes.NewReader(gifBytes(2048)), 1<<20, "photo.gif")
+	if err != nil {
+		t.Fatalf("SaveAttachment: %v", err)
+	}
+	if kind != "image" || contentType != "image/gif" {
+		t.Fatalf("kind=%q contentType=%q", kind, contentType)
+	}
+	if rel != filepath.Join("attachments", "a1.gif") || size != 2048 {
+		t.Fatalf("rel=%q size=%d", rel, size)
+	}
+	if _, err := os.Stat(filepath.Join(s.Root(), rel)); err != nil {
+		t.Fatalf("file not written: %v", err)
+	}
+}
+
+func TestSaveAttachmentAudio(t *testing.T) {
+	s := newTestStorage(t)
+	rel, _, kind, _, err := s.SaveAttachment("v1", bytes.NewReader(wavBytes(4096)), 1<<20, "voice.wav")
+	if err != nil {
+		t.Fatalf("SaveAttachment: %v", err)
+	}
+	if kind != "audio" {
+		t.Fatalf("kind = %q, want audio", kind)
+	}
+	if filepath.Ext(rel) != ".wav" {
+		t.Fatalf("ext = %q, want .wav", filepath.Ext(rel))
+	}
+}
+
+func TestSaveAttachmentGenericFile(t *testing.T) {
+	s := newTestStorage(t)
+	rel, contentType, kind, _, err := s.SaveAttachment("f1", bytes.NewReader([]byte("hello, world")), 1<<20, "notes.txt")
+	if err != nil {
+		t.Fatalf("SaveAttachment: %v", err)
+	}
+	if kind != "file" {
+		t.Fatalf("kind = %q, want file", kind)
+	}
+	if rel != filepath.Join("attachments", "f1.txt") {
+		t.Fatalf("rel = %q", rel)
+	}
+	if contentType != "text/plain; charset=utf-8" {
+		t.Fatalf("contentType = %q", contentType)
+	}
+}
+
+func TestSaveAttachmentSanitizesExtension(t *testing.T) {
+	s := newTestStorage(t)
+	rel, _, _, _, err := s.SaveAttachment("f2", bytes.NewReader([]byte("data")), 1<<20, "weird.<script>")
+	if err != nil {
+		t.Fatalf("SaveAttachment: %v", err)
+	}
+	if filepath.Ext(rel) != ".bin" {
+		t.Fatalf("ext = %q, want .bin", filepath.Ext(rel))
+	}
+}
+
+func TestSaveAttachmentRejectsTooLarge(t *testing.T) {
+	s := newTestStorage(t)
+	_, _, _, _, err := s.SaveAttachment("big", bytes.NewReader([]byte("0123456789")), 4, "big.bin")
+	if !errors.Is(err, ErrTooLarge) {
+		t.Fatalf("expected ErrTooLarge, got %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.Root(), "attachments", "big.bin")); !os.IsNotExist(err) {
+		t.Fatalf("expected oversized attachment removed, stat err=%v", err)
+	}
+}
+
+func TestSaveAttachmentAtLimitIsAccepted(t *testing.T) {
+	s := newTestStorage(t)
+	data := []byte("0123456789") // exactly 10 bytes
+	_, _, _, size, err := s.SaveAttachment("edge", bytes.NewReader(data), 10, "edge.bin")
+	if err != nil {
+		t.Fatalf("SaveAttachment at limit: %v", err)
+	}
+	if size != 10 {
+		t.Fatalf("size = %d, want 10", size)
+	}
+}
+
+func TestSaveAvatarAtLimitIsAccepted(t *testing.T) {
+	s := newTestStorage(t)
+	if _, err := s.SaveAvatar("edge", bytes.NewReader(pngBytes(1024)), 1024); err != nil {
+		t.Fatalf("SaveAvatar at limit: %v", err)
+	}
+}
+
+func TestContentTypeForExt(t *testing.T) {
+	cases := map[string]string{
+		".png":  "image/png",
+		".mp3":  "audio/mpeg",
+		".ogg":  "audio/ogg",
+		".weba": "application/octet-stream",
+		".unk":  "application/octet-stream",
+	}
+	for ext, want := range cases {
+		if got := ContentTypeForExt(ext); got != want {
+			t.Fatalf("ContentTypeForExt(%q) = %q, want %q", ext, got, want)
+		}
+	}
+}

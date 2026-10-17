@@ -95,6 +95,14 @@ func Conflict(message string) *AppError {
 	return newAppError(http.StatusConflict, CodeConflict, message)
 }
 
+// PayloadTooLarge returns a 413 error.
+func PayloadTooLarge(message string) *AppError {
+	if message == "" {
+		message = "The uploaded file is too large."
+	}
+	return newAppError(http.StatusRequestEntityTooLarge, CodePayloadTooBig, message)
+}
+
 // RateLimited returns a 429 error.
 func RateLimited(message string) *AppError {
 	if message == "" {

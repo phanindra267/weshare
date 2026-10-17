@@ -17,10 +17,13 @@ import (
 	"github.com/phanindra267/weshare/services/api/internal/config"
 	"github.com/phanindra267/weshare/services/api/internal/contacts"
 	"github.com/phanindra267/weshare/services/api/internal/database"
+	"github.com/phanindra267/weshare/services/api/internal/feed"
 	"github.com/phanindra267/weshare/services/api/internal/health"
 	apihttp "github.com/phanindra267/weshare/services/api/internal/http"
 	"github.com/phanindra267/weshare/services/api/internal/logging"
 	"github.com/phanindra267/weshare/services/api/internal/media"
+	"github.com/phanindra267/weshare/services/api/internal/messaging"
+	"github.com/phanindra267/weshare/services/api/internal/realtime"
 	"github.com/phanindra267/weshare/services/api/internal/users"
 )
 
@@ -84,15 +87,26 @@ func run() error {
 	}
 	logger.Info("media storage ready", "dir", storage.Root())
 
+	// Realtime hub fans events out over WebSockets and doubles as the messaging
+	// publisher, so the messaging service stays transport-agnostic.
+	contactsStore := contacts.NewStore(db)
+	hub := realtime.NewHub()
+	messagingService := messaging.NewService(messaging.NewStore(db), hub)
+	// The same hub fans out new Moments to a poster's friends.
+	feedService := feed.NewService(feed.NewStore(db), hub)
+
 	router := apihttp.New(apihttp.Options{
-		Config:   cfg,
-		Logger:   logger,
-		DB:       db,
-		Health:   health.NewHandler(db, cfg),
-		Auth:     auth.NewHandler(authService),
-		Users:    users.NewHandler(users.NewStore(db), storage, cfg),
-		Media:    media.NewHandler(storage),
-		Contacts: contacts.NewHandler(contacts.NewService(contacts.NewStore(db)), cfg),
+		Config:    cfg,
+		Logger:    logger,
+		DB:        db,
+		Health:    health.NewHandler(db, cfg),
+		Auth:      auth.NewHandler(authService),
+		Users:     users.NewHandler(users.NewStore(db), storage, cfg),
+		Media:     media.NewHandler(storage, cfg.MaxAttachmentBytes),
+		Contacts:  contacts.NewHandler(contacts.NewService(contactsStore), cfg),
+		Messaging: messaging.NewHandler(messagingService, cfg),
+		Realtime:  realtime.NewHandler(messagingService, hub, contactsStore, cfg, logger),
+		Feed:      feed.NewHandler(feedService, cfg),
 	})
 
 	srv := &http.Server{

@@ -14,6 +14,15 @@ servers:
 tags:
   - name: System
     description: Health and readiness probes.
+  - name: Messaging
+    description: >
+      Conversations (direct and group), message history, and read state
+      (Phases 3-4). The matching realtime protocol is documented in
+      `websocket-events.md`.
+  - name: Media
+    description: >
+      Upload and retrieval of chat attachments (images, voice notes, and
+      generic files). Avatars use the same storage under `/media/avatars`.
 
 paths:
   /healthz:
@@ -83,7 +92,539 @@ paths:
         "500":
           $ref: "#/components/responses/Error"
 
+  /api/v1/conversations:
+    get:
+      tags: [Messaging]
+      summary: List the caller's conversations
+      description: >
+        Conversations ordered by most recent activity, newest first, with the
+        peer profile, newest message, and unread count. Requires a session.
+      operationId: listConversations
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+        - name: cursor
+          in: query
+          description: Opaque cursor from a previous page's `next_cursor`.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: A page of conversations.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/CursorPage"
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  $ref: "#/components/schemas/Conversation"
+        "401":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Messaging]
+      summary: Open a direct conversation
+      description: >
+        Finds or creates the direct (1:1) conversation with the given user. The
+        pair must be connected contacts and neither may have blocked the other.
+      operationId: openConversation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/OpenConversationRequest"
+      responses:
+        "200":
+          description: The existing or newly created conversation.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Conversation"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/conversations/{id}:
+    get:
+      tags: [Messaging]
+      summary: Get one conversation
+      operationId: getConversation
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The conversation.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Conversation"
+        "404":
+          $ref: "#/components/responses/Error"
+    patch:
+      tags: [Messaging]
+      summary: Update group metadata
+      description: >
+        Updates a group's title and/or avatar. The caller must be the owner or an
+        admin. A system message records the change.
+      operationId: updateGroup
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateGroupRequest"
+      responses:
+        "200":
+          description: The updated group.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Conversation"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/conversations/{id}/messages:
+    get:
+      tags: [Messaging]
+      summary: List message history
+      description: >
+        Returns messages oldest-first. Use `before` to page backwards through
+        history; `next_cursor` is the `before` value for the next (older) page
+        and is empty when the start of history is reached.
+      operationId: listMessages
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 200
+        - name: before
+          in: query
+          description: Return messages with a sequence strictly below this value.
+          schema:
+            type: integer
+            minimum: 0
+        - name: after
+          in: query
+          description: Return messages with a sequence strictly above this value.
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "200":
+          description: A page of messages.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/CursorPage"
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  $ref: "#/components/schemas/Message"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Messaging]
+      summary: Send a message over REST
+      description: >
+        Persists a message and fans it out to members. Re-sending the same
+        `client_msg_id` returns the original message with `200` instead of
+        `201`. The realtime transport offers the same operation over WebSocket.
+      operationId: sendMessage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SendMessageRequest"
+      responses:
+        "201":
+          description: The message was created.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Message"
+        "200":
+          description: Idempotent replay of an existing message.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Message"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+        "429":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/conversations/{id}/read:
+    post:
+      tags: [Messaging]
+      summary: Mark messages read
+      description: >
+        Advances the caller's read position to at least the given sequence and
+        notifies the other members. Returns the caller's remaining unread count.
+      operationId: markConversationRead
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MarkReadRequest"
+      responses:
+        "200":
+          description: The updated unread count.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          unread_count:
+                            type: integer
+                        required: [unread_count]
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/conversations/group:
+    post:
+      tags: [Messaging]
+      summary: Create a group
+      description: >
+        Creates a group conversation owned by the caller. Every invited member
+        must be an accepted contact of the caller. A system message records the
+        creation. Returns the new conversation.
+      operationId: createGroup
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateGroupRequest"
+      responses:
+        "201":
+          description: The created group.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Conversation"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/conversations/{id}/members:
+    get:
+      tags: [Messaging]
+      summary: List group members
+      description: Lists a group's members with their roles, oldest join first.
+      operationId: listGroupMembers
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      responses:
+        "200":
+          description: The group's members.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          items:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/Member"
+                        required: [items]
+        "404":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Messaging]
+      summary: Add members
+      description: >
+        Adds accepted contacts to a group. The caller must be the owner or an
+        admin. Users already in the group are ignored.
+      operationId: addGroupMembers
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddMembersRequest"
+      responses:
+        "200":
+          description: How many members were newly added.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          added: { type: integer }
+                        required: [added]
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/conversations/{id}/members/{userId}:
+    delete:
+      tags: [Messaging]
+      summary: Remove a member
+      description: >
+        Removes a member. The caller must outrank the target (owner may remove
+        admins and members; an admin may remove members). The owner cannot be
+        removed.
+      operationId: removeGroupMember
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/UserId"
+      responses:
+        "204":
+          description: The member was removed.
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/conversations/{id}/members/{userId}/role:
+    post:
+      tags: [Messaging]
+      summary: Set a member's role
+      description: >
+        Promotes or demotes a member between `admin` and `member`. Only the owner
+        may do this; the owner's own role is immutable.
+      operationId: setGroupMemberRole
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+        - $ref: "#/components/parameters/UserId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SetRoleRequest"
+      responses:
+        "204":
+          description: The role was updated.
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/conversations/{id}/leave:
+    post:
+      tags: [Messaging]
+      summary: Leave a group
+      description: >
+        Removes the caller from a group. Ownership passes to the earliest
+        remaining member; when the last member leaves, the conversation is
+        deleted.
+      operationId: leaveGroup
+      parameters:
+        - $ref: "#/components/parameters/ConversationId"
+      responses:
+        "204":
+          description: The caller left the group.
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/media/attachments:
+    post:
+      tags: [Media]
+      summary: Upload an attachment
+      description: >
+        Uploads a chat attachment as `multipart/form-data` under the `file`
+        field. Images and audio are classified from their bytes; everything else
+        is stored as a generic file. Returns a URL to reference in a message and
+        the classified `kind`.
+      operationId: uploadAttachment
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                file:
+                  type: string
+                  format: binary
+              required: [file]
+      responses:
+        "201":
+          description: The stored attachment.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Attachment"
+        "413":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/media/attachments/{name}:
+    get:
+      tags: [Media]
+      summary: Download an attachment
+      description: >
+        Serves a stored attachment by name to authenticated users. The response
+        content type is derived from the stored extension.
+      operationId: getAttachment
+      parameters:
+        - name: name
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The raw attachment bytes.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "404":
+          $ref: "#/components/responses/Error"
+
 components:
+  parameters:
+    ConversationId:
+      name: id
+      in: path
+      required: true
+      description: The conversation (group) id.
+      schema:
+        type: string
+        format: uuid
+    UserId:
+      name: userId
+      in: path
+      required: true
+      description: The target user id.
+      schema:
+        type: string
+        format: uuid
+
   responses:
     Error:
       description: >
@@ -163,3 +704,175 @@ components:
         next_cursor:
           type: [string, "null"]
       required: [items, next_cursor]
+
+    UserBrief:
+      description: Public profile embedded in conversation payloads.
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username: { type: [string, "null"] }
+        display_name: { type: string }
+        avatar_url: { type: [string, "null"] }
+        status_message: { type: [string, "null"] }
+        online: { type: boolean }
+        last_seen_at: { type: [string, "null"], format: date-time }
+      required: [id, display_name, online]
+
+    Conversation:
+      description: >
+        A conversation as the caller sees it. Direct conversations populate
+        `peer`; groups populate `title`, `avatar_url`, `member_count`, and the
+        caller's `role`, and `peer` is null.
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        kind: { type: string, enum: [direct, group] }
+        peer:
+          oneOf:
+            - $ref: "#/components/schemas/UserBrief"
+            - type: "null"
+        title: { type: [string, "null"] }
+        avatar_url: { type: [string, "null"] }
+        member_count: { type: integer }
+        role: { type: string, enum: [member, admin, owner] }
+        last_message:
+          oneOf:
+            - $ref: "#/components/schemas/Message"
+            - type: "null"
+        unread_count: { type: integer }
+        created_at: { type: string, format: date-time }
+      required: [id, kind, peer, member_count, role, unread_count, created_at]
+
+    Member:
+      description: A group member joined with their public profile.
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        role: { type: string, enum: [member, admin, owner] }
+        display_name: { type: string }
+        username: { type: [string, "null"] }
+        avatar_url: { type: [string, "null"] }
+        status_message: { type: [string, "null"] }
+        online: { type: boolean }
+        last_seen_at: { type: [string, "null"], format: date-time }
+        joined_at: { type: string, format: date-time }
+      required: [id, role, display_name, online, joined_at]
+
+    Attachment:
+      description: A stored chat attachment referenced by a message's content.
+      type: object
+      properties:
+        url:
+          type: string
+          description: Path to retrieve the bytes, e.g. `/api/v1/media/attachments/<name>`.
+        content_type: { type: string }
+        kind: { type: string, enum: [image, audio, file] }
+        name: { type: string }
+        size: { type: integer }
+      required: [url, content_type, kind, name, size]
+
+    Message:
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        conversation_id: { type: string, format: uuid }
+        sender_id: { type: string, format: uuid }
+        sequence_no: { type: integer, minimum: 1 }
+        client_msg_id: { type: [string, "null"] }
+        message_type:
+          type: string
+          enum: [text, image, file, audio, system]
+        content:
+          description: >
+            Body shape depends on `message_type`. `text`: `{text}` (non-empty,
+            max 4000 characters). `image`: `{url}`. `audio`: `{url, duration?}`
+            (`duration` in seconds). `file`: `{url, name?, size?}`. `system`:
+            `{text}` (server-generated only).
+          type: object
+        status:
+          type: string
+          enum: [sent, delivered, read, received]
+        created_at: { type: string, format: date-time }
+        edited_at: { type: [string, "null"], format: date-time }
+        deleted_at: { type: [string, "null"], format: date-time }
+      required: [id, conversation_id, sender_id, sequence_no, message_type, content, status, created_at]
+
+    OpenConversationRequest:
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+      required: [user_id]
+
+    SendMessageRequest:
+      type: object
+      properties:
+        client_msg_id:
+          type: string
+          maxLength: 64
+          description: Client idempotency key; a retry with the same value does not duplicate.
+        message_type:
+          type: string
+          enum: [text, image, file, audio]
+          default: text
+        content:
+          type: object
+          description: Body matching `message_type`.
+      required: [client_msg_id, content]
+
+    MarkReadRequest:
+      type: object
+      properties:
+        sequence_no:
+          type: integer
+          minimum: 0
+          description: Advance the read position to at least this sequence.
+      required: [sequence_no]
+
+    CreateGroupRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          maxLength: 64
+          description: The group name.
+        member_ids:
+          type: array
+          maxItems: 256
+          description: User ids to invite (must be accepted contacts). The caller is implied.
+          items:
+            type: string
+            format: uuid
+      required: [title, member_ids]
+
+    UpdateGroupRequest:
+      type: object
+      properties:
+        title:
+          type: string
+          maxLength: 64
+        avatar_url:
+          type: string
+          description: A URL returned by the attachment upload endpoint.
+      minProperties: 1
+
+    AddMembersRequest:
+      type: object
+      properties:
+        user_ids:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items:
+            type: string
+            format: uuid
+      required: [user_ids]
+
+    SetRoleRequest:
+      type: object
+      properties:
+        role:
+          type: string
+          enum: [admin, member]
+      required: [role]

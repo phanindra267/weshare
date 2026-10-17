@@ -321,6 +321,29 @@ func (st *Store) ListContacts(ctx context.Context, me uuid.UUID, after *uuid.UUI
 	return contacts, nil
 }
 
+// FriendIDs returns the ids of the caller's accepted contacts. Because accepts
+// are stored bidirectionally, a single-direction lookup is complete. It backs
+// realtime presence fan-out to a user's friends.
+func (st *Store) FriendIDs(ctx context.Context, me uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := st.db.Pool.Query(ctx, `
+		SELECT contact_id FROM contacts
+		WHERE user_id = $1 AND status = '`+StatusAccepted+`'`, me)
+	if err != nil {
+		return nil, fmt.Errorf("friend ids: %w", err)
+	}
+	defer rows.Close()
+
+	ids := make([]uuid.UUID, 0)
+	for rows.Next() {
+		var id uuid.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("scan friend id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // ListRequests returns pending requests for the caller. For incoming requests
 // the joined profile is the sender's; for outgoing it is the recipient's.
 func (st *Store) ListRequests(ctx context.Context, me uuid.UUID, incoming bool, after *uuid.UUID, limit int) ([]RequestWithUser, error) {
