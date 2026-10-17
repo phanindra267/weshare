@@ -4,6 +4,8 @@
  * `packages/contracts/websocket-events.md`.
  */
 
+import type { MomentCreatedEvent } from "@/features/moments/types";
+
 /** Public peer profile embedded in conversation payloads. */
 export interface PeerBrief {
   id: string;
@@ -220,6 +222,7 @@ export type ServerEvent =
   | ReadAckEvent
   | ConversationUpdatedEvent
   | MemberChangedEvent
+  | MomentCreatedEvent
   | RealtimeErrorEvent
   | PongEvent;
 

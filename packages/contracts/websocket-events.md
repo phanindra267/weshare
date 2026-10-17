@@ -123,6 +123,7 @@ Unknown fields are ignored so the protocol can grow without breaking clients.
 | `error` | `code`, `message`, `request_id` | Implemented | 3 |
 | `conversation.updated` | `conversation_id`, `title`, `avatar_url`, `member_count` | Implemented | 4 |
 | `member.changed` | `conversation_id`, `user_id`, `role`, `action` (`added`\|`removed`\|`left`\|`role`) | Implemented | 4 |
+| `moment.created` | `moment` | Implemented | 5 |
 | `message.updated` | `message` | Planned | 3 |
 | `message.deleted` | `message_id` | Planned | 3 |
 | `call.invite` / `call.answer` / `call.candidate` | — | Planned | 6 |
@@ -142,6 +143,17 @@ user for `member.changed`), and never for direct conversations.
 
 System messages (for example, "Alice added Bob.") arrive as ordinary
 `message.created` events with `message_type: "system"`.
+
+### Moments (Phase 5)
+
+`moment.created` is published to the author's accepted contacts when a moment
+is created with `friends` visibility, and to nobody else for `private`. Public
+moments are still returned by the paginated `GET /api/v1/moments` feed for any
+authenticated caller, but are not broadcast, so the feed remains the source of
+truth. The `moment` payload matches `#/components/schemas/Moment` in the OpenAPI
+contract (author, body, media, like/comment counts, `liked_by_me`). Likes and
+comments do not currently emit realtime events; clients refresh counts on
+demand.
 
 ## Error codes
 

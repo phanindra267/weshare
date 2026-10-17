@@ -64,6 +64,9 @@ Suites:
 - `e2e/groups.spec.ts` — three users form a group, an image is shared live to
   another member, the member sees the group panel without admin tools, and a
   non-member receives `404` when reading the group's history.
+- `e2e/moments.spec.ts` — two users become contacts, one shares a friends-only
+  moment, the other sees it, likes it, and comments; the comment persists for the
+  author after reload.
 
 Playwright writes failure artifacts to `apps/web/test-results/` (git-ignored);
 open the trace with `npx playwright show-trace <path>`.

@@ -7,19 +7,34 @@ import { ErrorMessage } from "@/components/ui/ErrorMessage";
 import { Skeleton } from "@/components/ui/Skeleton";
 import { useToast } from "@/components/ui/Toast";
 import { ApiError } from "@/lib/api";
-import { momentsApi } from "./api";
+import { useAuth } from "@/features/auth/AuthProvider";
+import { useRealtime } from "@/features/messaging/RealtimeProvider";
+import { momentsApi, type UploadedAttachment } from "./api";
 import type { Moment } from "./types";
 import { MomentCard } from "./MomentCard";
 
+type Visibility = "friends" | "public" | "private";
+
+const MAX_MEDIA = 9;
+
 export function MomentsView() {
+  const { user } = useAuth();
   const { toast } = useToast();
+  const { subscribe } = useRealtime();
+  const currentUserId = user?.id ?? "";
+
   const [moments, setMoments] = React.useState<Moment[]>([]);
   const [loading, setLoading] = React.useState(true);
   const [error, setError] = React.useState<string | null>(null);
   const [nextCursor, setNextCursor] = React.useState<string | null>(null);
   const [loadingMore, setLoadingMore] = React.useState(false);
   const [body, setBody] = React.useState("");
+  const [visibility, setVisibility] = React.useState<Visibility>("friends");
+  const [attachments, setAttachments] = React.useState<UploadedAttachment[]>([]);
+  const [uploading, setUploading] = React.useState(false);
   const [posting, setPosting] = React.useState(false);
+
+  const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
   const fetchFeed = React.useCallback(async (cursor?: string | null) => {
     if (!cursor) {
@@ -33,7 +48,9 @@ export function MomentsView() {
       setNextCursor(page.next_cursor ?? null);
       setError(null);
     } catch (cause) {
-      setError(cause instanceof ApiError ? cause.message : "Unable to load moments.");
+      setError(
+        cause instanceof ApiError ? cause.message : "Unable to load moments.",
+      );
     } finally {
       setLoading(false);
       setLoadingMore(false);
@@ -57,15 +74,72 @@ export function MomentsView() {
     };
   }, [fetchFeed]);
 
+  // Prepend moments shared by friends while this view is open.
+  React.useEffect(() => {
+    const unsubscribe = subscribe((event) => {
+      if (event.type !== "moment.created") return;
+      const incoming = event.moment;
+      setMoments((prev) =>
+        prev.some((m) => m.id === incoming.id) ? prev : [incoming, ...prev],
+      );
+    });
+    return unsubscribe;
+  }, [subscribe]);
+
+  const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    if (attachments.length >= MAX_MEDIA) {
+      toast({
+        title: "Too many attachments",
+        description: `You can attach up to ${MAX_MEDIA} files.`,
+        variant: "error",
+      });
+      return;
+    }
+    setUploading(true);
+    try {
+      const uploaded = await momentsApi.uploadMedia(file);
+      const isImage = uploaded.content_type.startsWith("image/");
+      const isVideo = uploaded.content_type.startsWith("video/");
+      if (!isImage && !isVideo) {
+        toast({
+          title: "Unsupported file",
+          description: "Moments support photos and videos only.",
+          variant: "error",
+        });
+        return;
+      }
+      setAttachments((prev) => [...prev, uploaded]);
+    } catch (cause) {
+      toast({
+        title: "Upload failed",
+        description: cause instanceof ApiError ? cause.message : undefined,
+        variant: "error",
+      });
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const trimmed = body.trim();
-    if (!trimmed) return;
+    if (!trimmed && attachments.length === 0) return;
     setPosting(true);
     try {
-      const moment = await momentsApi.create({ body: trimmed, visibility: "friends" });
+      const moment = await momentsApi.create({
+        body: trimmed,
+        visibility,
+        media: attachments.map((a) => ({
+          url: a.url,
+          media_type: a.content_type.startsWith("video/") ? "video" : "image",
+        })),
+      });
       setMoments((prev) => [moment, ...prev]);
       setBody("");
+      setAttachments([]);
     } catch (cause) {
       toast({
         title: "Could not share moment",
@@ -77,9 +151,63 @@ export function MomentsView() {
     }
   };
 
+  const applyLike = (id: string, liked: boolean, count?: number) => {
+    setMoments((prev) =>
+      prev.map((m) =>
+        m.id === id
+          ? {
+              ...m,
+              liked_by_me: liked,
+              like_count:
+                count ?? Math.max(0, m.like_count + (liked ? 1 : -1)),
+            }
+          : m,
+      ),
+    );
+  };
+
+  const handleToggleLike = async (moment: Moment) => {
+    const liked = moment.liked_by_me;
+    // Optimistic update.
+    applyLike(moment.id, !liked);
+    try {
+      const result = liked
+        ? await momentsApi.unlike(moment.id)
+        : await momentsApi.like(moment.id);
+      setMoments((prev) =>
+        prev.map((m) =>
+          m.id === moment.id
+            ? { ...m, liked_by_me: result.liked, like_count: result.like_count }
+            : m,
+        ),
+      );
+    } catch (cause) {
+      applyLike(moment.id, liked, moment.like_count);
+      toast({
+        title: "Could not update reaction",
+        description: cause instanceof ApiError ? cause.message : undefined,
+        variant: "error",
+      });
+    }
+  };
+
+  const handleDelete = (moment: Moment) => {
+    setMoments((prev) => prev.filter((m) => m.id !== moment.id));
+  };
+
+  const handleCommentCountChange = (momentId: string, delta: number) => {
+    setMoments((prev) =>
+      prev.map((m) =>
+        m.id === momentId
+          ? { ...m, comment_count: Math.max(0, m.comment_count + delta) }
+          : m,
+      ),
+    );
+  };
+
   if (loading && moments.length === 0) {
     return (
-      <div className="mx-auto flex max-w-2xl flex-col gap-4">
+      <div className="flex flex-col gap-4">
         <Skeleton className="h-24 w-full" />
         <Skeleton className="h-40 w-full" />
         <Skeleton className="h-40 w-full" />
@@ -97,18 +225,78 @@ export function MomentsView() {
     );
   }
 
+  const canPost = body.trim().length > 0 || attachments.length > 0;
+
   return (
-    <div className="mx-auto flex max-w-2xl flex-col gap-4">
-      <form onSubmit={handleSubmit} className="border-border-subtle bg-surface-raised rounded-xl border p-4">
+    <div className="flex flex-col gap-4">
+      <form
+        onSubmit={handleSubmit}
+        className="border-border-subtle bg-surface-raised rounded-xl border p-4"
+      >
         <textarea
           value={body}
           onChange={(e) => setBody(e.target.value)}
           placeholder="What's on your mind?"
           rows={3}
+          aria-label="Moment body"
           className="border-border-subtle bg-surface w-full resize-none rounded-lg border px-3 py-2 text-sm"
         />
-        <div className="mt-3 flex justify-end">
-          <Button type="submit" loading={posting} disabled={!body.trim()}>
+
+        {attachments.length > 0 ? (
+          <ul className="mt-3 flex flex-wrap gap-2">
+            {attachments.map((a) => (
+              <li
+                key={a.url}
+                className="border-border-subtle bg-surface flex items-center gap-2 rounded-lg border px-2 py-1 text-xs"
+              >
+                <span className="max-w-40 truncate">{a.name}</span>
+                <button
+                  type="button"
+                  aria-label={`Remove ${a.name}`}
+                  onClick={() =>
+                    setAttachments((prev) =>
+                      prev.filter((item) => item.url !== a.url),
+                    )
+                  }
+                  className="text-ink-muted hover:text-ink"
+                >
+                  ×
+                </button>
+              </li>
+            ))}
+          </ul>
+        ) : null}
+
+        <div className="mt-3 flex items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*,video/*"
+              className="hidden"
+              onChange={handleUpload}
+            />
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              loading={uploading}
+              onClick={() => fileInputRef.current?.click()}
+            >
+              Add photo
+            </Button>
+            <select
+              value={visibility}
+              onChange={(e) => setVisibility(e.target.value as Visibility)}
+              aria-label="Visibility"
+              className="border-border-subtle bg-surface text-ink rounded-md border px-2 py-1 text-sm"
+            >
+              <option value="friends">Friends</option>
+              <option value="public">Public</option>
+              <option value="private">Only me</option>
+            </select>
+          </div>
+          <Button type="submit" loading={posting} disabled={!canPost}>
             Share
           </Button>
         </div>
@@ -122,14 +310,26 @@ export function MomentsView() {
       ) : (
         <div className="flex flex-col gap-3">
           {moments.map((moment) => (
-            <MomentCard key={moment.id} moment={moment} />
+            <MomentCard
+              key={moment.id}
+              moment={moment}
+              currentUserId={currentUserId}
+              onToggleLike={(m) => void handleToggleLike(m)}
+              onDelete={handleDelete}
+              onCommentCountChange={handleCommentCountChange}
+            />
           ))}
         </div>
       )}
 
       {nextCursor ? (
         <div className="flex justify-center">
-          <Button variant="ghost" size="sm" loading={loadingMore} onClick={() => void fetchFeed(nextCursor)}>
+          <Button
+            variant="ghost"
+            size="sm"
+            loading={loadingMore}
+            onClick={() => void fetchFeed(nextCursor)}
+          >
             Load more
           </Button>
         </div>

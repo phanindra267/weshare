@@ -1,10 +1,10 @@
 # WeShare — Implementation Audit
 Created: 2026-10-15
-Last updated: 2026-10-15
+Last updated: 2026-10-17
 
 This audit is the authoritative inventory of what currently exists in the
-repository. It is written after inspecting the codebase and before proceeding
-with Phase 1.
+repository. It is written after inspecting the codebase and is kept in sync as
+phases land.
 
 ## Repository layout
 
@@ -12,7 +12,7 @@ with Phase 1.
 - `weshare/services/api` (Go 1.26.5, Gin, pgx/v5)
 - `weshare/infra` (Docker Compose, scripts)
 - `weshare/packages/contracts` (OpenAPI + WebSocket event contracts)
-- `weshare/docs` (to be completed)
+- `weshare/docs` (phase status, next steps, testing, this audit)
 - `weshare/migrations` embedded under `services/api/migrations`
 
 ## Phase 0 — Foundation (status)
@@ -25,31 +25,41 @@ with Phase 1.
 - Migrations: embedded SQL, baseline 000001_init with shared `set_updated_at()`
 - Frontend: API client with typed error envelopes, env config with validation,
   UI primitives (Button, Input, Textarea, Field, Select, Dialog, Dropdown,
-  Toast, Skeleton, ErrorMessage, EmptyState), backend connectivity probe on
-  landing page, Vitest + RTL, Playwright config, Prettier + ESLint
+  Toast, Skeleton, ErrorMessage, EmptyState), Vitest + RTL, Playwright config
 - Quality gates: Go build/vet/tests pass; frontend lint/typecheck/tests/build
   pass
-- Infrastructure and tooling: PowerShell scripts, Makefile, `.env.example` files
+
+## Phase summary
+
+| Phase | Title | Status | Key migrations |
+|---|---|---|---|
+| 0 | Foundation | Verified | `000001_init` |
+| 1 | Authentication, Accounts, Profiles | Verified | `000002_users`..`000005_devices` |
+| 2 | Contacts and Presence | Verified | `000006_contacts` |
+| 3 | One-to-One Real-Time Messaging | Verified | `000007_messaging` |
+| 4 | Groups, Media, Voice | Verified | `000008_groups` |
+| 5 | Moments, Social, Discover | Verified | `000009_feed` |
 
 ## Existing files (high level)
 
 ### Backend
 - `cmd/server/main.go`, `cmd/migrate/main.go`
-- `internal/config/*` (load+validate + tests)
-- `internal/database/*` (pool + migrations + tests)
-- `internal/health/*` (liveness/readiness + tests)
-- `internal/http/*` (router + tests)
-- `internal/httpx/*` (errors, response, context + tests)
-- `internal/logging/*`
-- `internal/middleware/*`
+- `internal/config/*`, `internal/database/*`, `internal/health/*`,
+  `internal/http/*` (router), `internal/httpx/*`, `internal/logging/*`,
+  `internal/middleware/*`
+- `internal/auth/*`, `internal/users/*`, `internal/media/*`
+- `internal/contacts/*`
+- `internal/messaging/*`, `internal/realtime/*`
+- `internal/feed/*` (Moments: store, service, handler, DTOs, events, errors)
 - `migrations/*.sql`, `migrations/migrations.go`
 
 ### Frontend
-- `src/app/*` (layout, page, globals.css)
-- `src/lib/*` (api, env, cn, tests)
-- `src/types/*`
-- `src/components/layout/BackendStatus.tsx`
-- `src/components/ui/*` (primitives + Button test)
+- `src/app/*` (`/`, `/login`, `/register`, `/profile`, `/contacts`, `/messages`,
+  `/moments`), `globals.css`, layout
+- `src/lib/*` (api, env, cn, media), `src/types/*`
+- `src/components/ui/*`, `src/components/layout/*` (AppHeader, …)
+- `src/features/auth`, `features/contacts`, `features/presence`,
+  `features/messaging`, `features/moments`
 - Configs: vitest.config.mts, vitest.setup.ts, playwright.config.ts,
   tsconfig.json, eslint.config.mjs, .prettierrc.json
 
@@ -59,22 +69,38 @@ with Phase 1.
 
 ## Missing / planned (by phase)
 
-- Phases 1-16: auth, contacts/presence, messaging (WS), groups/media/voice,
-  Moments/social/Discover, WebRTC calls, notifications/search/sync, demo wallet,
-  mini-apps, settings/privacy/accessibility, schema hardening/OpenAPI expansion,
-  security, full E2E test suite, polish, performance, docs completion.
+- **Phase 6 — WebRTC Calls:** audio/video signalling over the realtime hub,
+  ICE config, call history, in-call UI. `call.*` events are reserved in the
+  WebSocket contract.
+- **Phase 7 — Notifications, Search, Sync:** `notification.created` event
+  reserved; message/contact search; offline sync hardening.
+- **Phase 8 — Demo wallet.**
+- **Phase 9 — Mini-apps.**
+- **Phase 10 — Settings, privacy, accessibility.**
+- **Phase 11 — Schema hardening, OpenAPI expansion.**
+- **Phase 12 — Security.**
+- **Phase 13 — Full E2E test suite.**
+- **Phase 14 — Polish.**
+- **Phase 15 — Performance.**
+- **Phase 16 — Docs completion.**
+
+Cross-cutting gaps: no `users` package unit tests; message edit/delete write
+path not implemented; in-memory rate limiting; single-page `sync` catch-up.
 
 ## Risks/notes
 
 - Docker Compose Postgres uses port 5433 (5432 occupied on this machine).
-- WebRTC E2E cannot be fully automated; manual verification documented.
+- WebRTC E2E cannot be fully automated without fake media devices; manual
+  verification will be documented.
 - No `make` on Windows; PowerShell scripts provided.
 - Transitive dev-only npm advisory (braces/micromatch) noted; not runtime.
 - No psql CLI installed; use `docker exec` if needed.
 
 ## Conclusion
 
-Phases 0 (foundation) through 3 (one-to-one real-time messaging) are complete
-and verified — see `docs/PHASE_STATUS.md` for actual test results. The codebase
-is ready to proceed to Phase 4 (Groups, Media, Voice); the ordered plan lives in
-`docs/NEXT_STEPS.md`.
+Phases 0 (foundation) through 5 (Moments, Social, Discover) are complete and
+verified — see `docs/PHASE_STATUS.md` for actual test results. All Go gates
+(build/vet/gofmt/test across 11 packages) and frontend gates
+(lint/typecheck/39 tests/build) pass, and the live browser E2E suites
+(`messaging`, `groups`, `moments`) pass 3/3. The ordered plan for the next phase
+lives in `docs/NEXT_STEPS.md` (Phase 6 — WebRTC Calls).

@@ -114,12 +114,18 @@ Migrations are embedded in `services/api/migrations/*.sql` and executed via the 
 
 - `docs/IMPLEMENTATION_AUDIT.md` — current state inventory
 - `docs/PHASE_STATUS.md` — per-phase status + test results
-- `docs/NEXT_STEPS.md` — concrete next actions (Phase 4)
-- `docs/ARCHITECTURE.md`, `docs/DATABASE.md`, `docs/API.md`, `docs/SECURITY.md`, `docs/TESTING.md`, `docs/DEPLOYMENT.md`, `docs/LOCAL_SETUP.md` — living documentation
+- `docs/NEXT_STEPS.md` — concrete next actions (Phase 6 — WebRTC Calls)
+- `docs/TESTING.md` — how to run every automated gate, including live E2E
+
+Planned (not yet written): `docs/ARCHITECTURE.md`, `docs/DATABASE.md`,
+`docs/API.md`, `docs/SECURITY.md`, `docs/DEPLOYMENT.md`, `docs/LOCAL_SETUP.md`.
 
 ## Implementation status
 
-Phases 0 (Foundation), 1 (Authentication, Accounts, and Profiles), 2 (Contacts and Presence), and 3 (One-to-One Real-Time Messaging) are **Verified**. See `docs/PHASE_STATUS.md` for actual test results and `docs/NEXT_STEPS.md` for the Phase 4 (groups, media, voice) plan.
+Phases 0–5 are **Verified**: Foundation, Authentication/Accounts/Profiles,
+Contacts and Presence, One-to-One Real-Time Messaging, Groups/Media/Voice, and
+Moments/Social/Discover. See `docs/PHASE_STATUS.md` for actual test results and
+`docs/NEXT_STEPS.md` for the Phase 6 (WebRTC calls) plan.
 
 ## Legal / notes
 

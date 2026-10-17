@@ -31,6 +31,12 @@ export function AppHeader() {
           {status === "authenticated" && user ? (
             <>
               <Link
+                href="/moments"
+                className="text-ink-muted hover:text-ink text-sm"
+              >
+                Moments
+              </Link>
+              <Link
                 href="/messages"
                 className="text-ink-muted hover:text-ink text-sm"
               >

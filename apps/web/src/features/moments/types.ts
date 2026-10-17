@@ -44,3 +44,9 @@ export type Media = z.infer<typeof mediaSchema>;
 export type Moment = z.infer<typeof momentSchema>;
 export type Comment = z.infer<typeof commentSchema>;
 export type MomentPage = z.infer<typeof momentPageSchema>;
+
+/** Realtime `moment.created` payload pushed to a user's friends. */
+export interface MomentCreatedEvent {
+  type: "moment.created";
+  moment: Moment;
+}

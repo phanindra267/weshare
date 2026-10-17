@@ -78,9 +78,13 @@ func (h *Handler) Create(c *gin.Context) {
 	for _, item := range body.Media {
 		media = append(media, MediaInput{URL: item.URL, MediaType: item.MediaType})
 	}
+	visibility := body.Visibility
+	if visibility == "" {
+		visibility = c.Query("visibility")
+	}
 	moment, err := h.svc.Create(c.Request.Context(), toAuthor(user), CreateMomentInput{
 		Body:       body.Body,
-		Visibility: c.Query("visibility"),
+		Visibility: visibility,
 		Media:      media,
 	})
 	if err != nil {

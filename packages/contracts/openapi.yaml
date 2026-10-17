@@ -23,6 +23,11 @@ tags:
     description: >
       Upload and retrieval of chat attachments (images, voice notes, and
       generic files). Avatars use the same storage under `/media/avatars`.
+  - name: Moments
+    description: >
+      Short social posts (moments) with media, likes, and comments (Phase 5).
+      Moments support visibility levels (friends, public, private) and keyset
+      pagination.
 
 paths:
   /healthz:
@@ -606,6 +611,287 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
 
+  /api/v1/moments:
+    get:
+      tags: [Moments]
+      summary: List the moment feed
+      description: >
+        Returns moments authored by the caller and their accepted contacts,
+        newest first, with keyset pagination. Public moments from any author are
+        also visible. `next_cursor` is opaque and empty on the last page.
+      operationId: listMoments
+      parameters:
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+      responses:
+        "200":
+          description: A page of moments.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/MomentPage"
+        "401":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Moments]
+      summary: Create a moment
+      description: >
+        Publishes a moment and, for `friends` visibility, fans it out to the
+        author's accepted contacts over the realtime socket as
+        `moment.created`.
+      operationId: createMoment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CreateMomentRequest"
+      responses:
+        "201":
+          description: The created moment.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Moment"
+        "401":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/moments/{id}:
+    get:
+      tags: [Moments]
+      summary: Get a moment
+      description: >
+        Returns a moment the caller may view (their own, a contact's, or any
+        public moment). Hidden moments answer 404 rather than disclosing that
+        they exist.
+      operationId: getMoment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The moment.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Moment"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Moments]
+      summary: Delete a moment
+      description: >
+        Soft-deletes the caller's own moment (sets `deleted_at`); hidden
+        moments no longer appear in any feed. Only the author may delete.
+      operationId: deleteMoment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/moments/{id}/likes:
+    post:
+      tags: [Moments]
+      summary: Like a moment
+      operationId: likeMoment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The resulting like state.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/LikeState"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Moments]
+      summary: Unlike a moment
+      operationId: unlikeMoment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The resulting like state.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/LikeState"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/moments/{id}/comments:
+    get:
+      tags: [Moments]
+      summary: List a moment's comments
+      description: Returns comments oldest first with keyset pagination.
+      operationId: listMomentComments
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: cursor
+          in: query
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 50
+      responses:
+        "200":
+          description: A page of comments.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/CommentPage"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    post:
+      tags: [Moments]
+      summary: Add a comment
+      operationId: addMomentComment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AddCommentRequest"
+      responses:
+        "201":
+          description: The created comment.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Comment"
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/moments/{id}/comments/{commentId}:
+    delete:
+      tags: [Moments]
+      summary: Delete a comment
+      description: The commenter or the moment's author may delete a comment.
+      operationId: deleteMomentComment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: commentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Deleted.
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
 components:
   parameters:
     ConversationId:
@@ -799,6 +1085,82 @@ components:
         deleted_at: { type: [string, "null"], format: date-time }
       required: [id, conversation_id, sender_id, sequence_no, message_type, content, status, created_at]
 
+    MomentAuthor:
+      description: Public profile of a moment or comment author.
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        username: { type: [string, "null"] }
+        display_name: { type: string }
+        avatar_url: { type: [string, "null"] }
+      required: [id, display_name]
+
+    MomentMedia:
+      description: One attachment on a moment.
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        url: { type: string }
+        media_type: { type: string, enum: [image, video] }
+        position: { type: integer, minimum: 0 }
+      required: [id, url, media_type, position]
+
+    Moment:
+      description: A short social post joined with its author, media, and engagement counts.
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        author: { $ref: "#/components/schemas/MomentAuthor" }
+        body: { type: string }
+        visibility: { type: string, enum: [friends, public, private] }
+        media:
+          type: array
+          items: { $ref: "#/components/schemas/MomentMedia" }
+        like_count: { type: integer, minimum: 0 }
+        comment_count: { type: integer, minimum: 0 }
+        liked_by_me: { type: boolean }
+        created_at: { type: string, format: date-time }
+      required: [id, author, body, visibility, media, like_count, comment_count, liked_by_me, created_at]
+
+    Comment:
+      description: A reply on a moment joined with its author.
+      type: object
+      properties:
+        id: { type: string, format: uuid }
+        moment_id: { type: string, format: uuid }
+        author: { $ref: "#/components/schemas/MomentAuthor" }
+        body: { type: string }
+        created_at: { type: string, format: date-time }
+      required: [id, moment_id, author, body, created_at]
+
+    MomentPage:
+      description: Cursor-paginated page of moments (newest first).
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Moment" }
+        next_cursor: { type: [string, "null"] }
+      required: [items, next_cursor]
+
+    CommentPage:
+      description: Cursor-paginated page of comments (oldest first).
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Comment" }
+        next_cursor: { type: [string, "null"] }
+      required: [items, next_cursor]
+
+    LikeState:
+      description: The caller's like state on a moment after a like or unlike.
+      type: object
+      properties:
+        like_count: { type: integer, minimum: 0 }
+        liked: { type: boolean }
+      required: [like_count, liked]
+
     OpenConversationRequest:
       type: object
       properties:
@@ -820,6 +1182,44 @@ components:
           type: object
           description: Body matching `message_type`.
       required: [client_msg_id, content]
+
+    CreateMomentRequest:
+      type: object
+      description: Body of POST /api/v1/moments.
+      properties:
+        body:
+          type: string
+          description: Moment body text (max 2000 characters).
+        visibility:
+          type: string
+          enum: [friends, public, private]
+          default: friends
+        media:
+          type: array
+          maxItems: 9
+          items:
+            $ref: "#/components/schemas/MediaInputRequest"
+      minProperties: 1
+
+    AddCommentRequest:
+      type: object
+      properties:
+        body:
+          type: string
+          minLength: 1
+          maxLength: 1000
+      required: [body]
+
+    MediaInputRequest:
+      type: object
+      properties:
+        url:
+          type: string
+          description: A URL returned by the attachment upload endpoint.
+        media_type:
+          type: string
+          enum: [image, video]
+      required: [url, media_type]
 
     MarkReadRequest:
       type: object
