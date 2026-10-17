@@ -60,17 +60,31 @@ type Moment struct {
 	CreatedAt    time.Time
 }
 
-// Comment is a reply joined with its author.
+// Comment is a reply joined with its author and optional reply target.
 type Comment struct {
-	ID        uuid.UUID
-	MomentID  uuid.UUID
-	Author    Author
-	Body      string
-	CreatedAt time.Time
+	ID            uuid.UUID
+	MomentID      uuid.UUID
+	Author        Author
+	ReplyToID     *uuid.UUID
+	ReplyToAuthor *Author
+	Body          string
+	CreatedAt     time.Time
 }
 
 // MediaInput is one attachment supplied when creating a moment.
 type MediaInput struct {
 	URL       string
 	MediaType string
+}
+
+// UpdateMomentInput is parameters for editing a moment (author only).
+type UpdateMomentInput struct {
+	Body       *string
+	Visibility *string
+}
+
+// ReportInput is parameters for reporting a moment.
+type ReportInput struct {
+	Reason  string
+	Details string
 }

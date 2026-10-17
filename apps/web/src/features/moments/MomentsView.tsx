@@ -9,6 +9,8 @@ import { useToast } from "@/components/ui/Toast";
 import { ApiError } from "@/lib/api";
 import { useAuth } from "@/features/auth/AuthProvider";
 import { useRealtime } from "@/features/messaging/RealtimeProvider";
+import { contactsApi } from "@/features/contacts/api";
+import type { Contact } from "@/features/contacts/types";
 import { momentsApi, type UploadedAttachment } from "./api";
 import type { Moment } from "./types";
 import { MomentCard } from "./MomentCard";
@@ -33,6 +35,12 @@ export function MomentsView() {
   const [attachments, setAttachments] = React.useState<UploadedAttachment[]>([]);
   const [uploading, setUploading] = React.useState(false);
   const [posting, setPosting] = React.useState(false);
+
+  // Excluded contacts state for restricted audience
+  const [showExclusions, setShowExclusions] = React.useState(false);
+  const [contacts, setContacts] = React.useState<Contact[]>([]);
+  const [loadingContacts, setLoadingContacts] = React.useState(false);
+  const [excludedContactIds, setExcludedContactIds] = React.useState<string[]>([]);
 
   const fileInputRef = React.useRef<HTMLInputElement | null>(null);
 
@@ -86,6 +94,35 @@ export function MomentsView() {
     return unsubscribe;
   }, [subscribe]);
 
+  // Load contacts when user opens the exclusions picker
+  const handleToggleExclusions = async () => {
+    const next = !showExclusions;
+    setShowExclusions(next);
+    if (next && contacts.length === 0) {
+      setLoadingContacts(true);
+      try {
+        const res = await contactsApi.list();
+        setContacts(res.items);
+      } catch (cause) {
+        toast({
+          title: "Could not load contacts",
+          description: cause instanceof ApiError ? cause.message : undefined,
+          variant: "error",
+        });
+      } finally {
+        setLoadingContacts(false);
+      }
+    }
+  };
+
+  const toggleExcludeContact = (contactUserId: string) => {
+    setExcludedContactIds((prev) =>
+      prev.includes(contactUserId)
+        ? prev.filter((id) => id !== contactUserId)
+        : [...prev, contactUserId],
+    );
+  };
+
   const handleUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
@@ -132,6 +169,10 @@ export function MomentsView() {
       const moment = await momentsApi.create({
         body: trimmed,
         visibility,
+        excluded_user_ids:
+          visibility === "friends" && excludedContactIds.length > 0
+            ? excludedContactIds
+            : undefined,
         media: attachments.map((a) => ({
           url: a.url,
           media_type: a.content_type.startsWith("video/") ? "video" : "image",
@@ -140,6 +181,8 @@ export function MomentsView() {
       setMoments((prev) => [moment, ...prev]);
       setBody("");
       setAttachments([]);
+      setExcludedContactIds([]);
+      setShowExclusions(false);
     } catch (cause) {
       toast({
         title: "Could not share moment",
@@ -192,6 +235,14 @@ export function MomentsView() {
   };
 
   const handleDelete = (moment: Moment) => {
+    setMoments((prev) => prev.filter((m) => m.id !== moment.id));
+  };
+
+  const handleUpdate = (updated: Moment) => {
+    setMoments((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
+  };
+
+  const handleHide = (moment: Moment) => {
     setMoments((prev) => prev.filter((m) => m.id !== moment.id));
   };
 
@@ -267,8 +318,8 @@ export function MomentsView() {
           </ul>
         ) : null}
 
-        <div className="mt-3 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <input
               ref={fileInputRef}
               type="file"
@@ -283,7 +334,7 @@ export function MomentsView() {
               loading={uploading}
               onClick={() => fileInputRef.current?.click()}
             >
-              Add photo
+              Add photo / video
             </Button>
             <select
               value={visibility}
@@ -295,11 +346,58 @@ export function MomentsView() {
               <option value="public">Public</option>
               <option value="private">Only me</option>
             </select>
+            {visibility === "friends" ? (
+              <button
+                type="button"
+                onClick={() => void handleToggleExclusions()}
+                className="text-ink-muted hover:text-ink text-xs underline"
+              >
+                {excludedContactIds.length > 0
+                  ? `Exclude ${excludedContactIds.length} contact${excludedContactIds.length > 1 ? "s" : ""}`
+                  : "Exclude contacts"}
+              </button>
+            ) : null}
           </div>
           <Button type="submit" loading={posting} disabled={!canPost}>
             Share
           </Button>
         </div>
+
+        {/* Exclusions Picker */}
+        {showExclusions && visibility === "friends" ? (
+          <div className="border-border-subtle bg-surface mt-3 rounded-lg border p-3 text-xs">
+            <p className="text-ink font-semibold mb-2">
+              Select contacts to exclude from seeing this moment:
+            </p>
+            {loadingContacts ? (
+              <p className="text-ink-muted">Loading contacts…</p>
+            ) : contacts.length === 0 ? (
+              <p className="text-ink-muted">No contacts found to exclude.</p>
+            ) : (
+              <div className="max-h-36 overflow-y-auto flex flex-col gap-1.5">
+                {contacts.map((contact) => (
+                  <label
+                    key={contact.user.id}
+                    className="flex items-center gap-2 cursor-pointer hover:text-ink text-ink-muted"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={excludedContactIds.includes(contact.user.id)}
+                      onChange={() => toggleExcludeContact(contact.user.id)}
+                      className="rounded border-border-subtle"
+                    />
+                    <span>{contact.user.display_name}</span>
+                    {contact.user.username ? (
+                      <span className="text-ink-muted opacity-70">
+                        (@{contact.user.username})
+                      </span>
+                    ) : null}
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : null}
       </form>
 
       {moments.length === 0 ? (
@@ -316,6 +414,8 @@ export function MomentsView() {
               currentUserId={currentUserId}
               onToggleLike={(m) => void handleToggleLike(m)}
               onDelete={handleDelete}
+              onUpdate={handleUpdate}
+              onHide={handleHide}
               onCommentCountChange={handleCommentCountChange}
             />
           ))}

@@ -14,15 +14,19 @@ interface MomentCardProps {
   currentUserId: string;
   onToggleLike: (moment: Moment) => void;
   onDelete: (moment: Moment) => void;
+  onUpdate?: (moment: Moment) => void;
+  onHide?: (moment: Moment) => void;
   onCommentCountChange: (momentId: string, delta: number) => void;
 }
 
-/** A single moment with its media, likes, and comments. */
+/** A single moment with its media, likes, comments, editing, hide and report actions. */
 export function MomentCard({
   moment,
   currentUserId,
   onToggleLike,
   onDelete,
+  onUpdate,
+  onHide,
   onCommentCountChange,
 }: MomentCardProps) {
   const { toast } = useToast();
@@ -34,6 +38,22 @@ export function MomentCard({
   const [draft, setDraft] = React.useState("");
   const [submitting, setSubmitting] = React.useState(false);
   const [deleting, setDeleting] = React.useState(false);
+
+  // Edit post state
+  const [isEditing, setIsEditing] = React.useState(false);
+  const [editBody, setEditBody] = React.useState(moment.body);
+  const [editVisibility, setEditVisibility] = React.useState(moment.visibility);
+  const [savingEdit, setSavingEdit] = React.useState(false);
+
+  // Hide & Report states
+  const [hiding, setHiding] = React.useState(false);
+  const [reportOpen, setReportOpen] = React.useState(false);
+  const [reportReason, setReportReason] = React.useState("spam");
+  const [reportDetails, setReportDetails] = React.useState("");
+  const [submittingReport, setSubmittingReport] = React.useState(false);
+
+  // Comment replies state
+  const [replyingTo, setReplyingTo] = React.useState<Comment | null>(null);
 
   const isAuthor = moment.author.id === currentUserId;
 
@@ -74,9 +94,12 @@ export function MomentCard({
     if (!text) return;
     setSubmitting(true);
     try {
-      const comment = await momentsApi.addComment(moment.id, text);
+      const comment = replyingTo
+        ? await momentsApi.addComment(moment.id, text, replyingTo.id)
+        : await momentsApi.addComment(moment.id, text);
       setComments((prev) => [...prev, comment]);
       setDraft("");
+      setReplyingTo(null);
       onCommentCountChange(moment.id, 1);
     } catch (cause) {
       toast({
@@ -120,6 +143,77 @@ export function MomentCard({
     }
   };
 
+  const handleSaveEdit = async () => {
+    setSavingEdit(true);
+    try {
+      const updated = await momentsApi.update(moment.id, {
+        body: editBody.trim(),
+        visibility: editVisibility,
+      });
+      setIsEditing(false);
+      onUpdate?.(updated);
+      toast({
+        title: "Post updated",
+        variant: "success",
+      });
+    } catch (cause) {
+      toast({
+        title: "Could not update post",
+        description: cause instanceof ApiError ? cause.message : undefined,
+        variant: "error",
+      });
+    } finally {
+      setSavingEdit(false);
+    }
+  };
+
+  const handleHide = async () => {
+    setHiding(true);
+    try {
+      await momentsApi.hide(moment.id);
+      onHide?.(moment);
+      toast({
+        title: "Post hidden",
+        description: "This post will no longer appear in your feed.",
+        variant: "success",
+      });
+    } catch (cause) {
+      toast({
+        title: "Could not hide post",
+        description: cause instanceof ApiError ? cause.message : undefined,
+        variant: "error",
+      });
+    } finally {
+      setHiding(false);
+    }
+  };
+
+  const handleReport = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setSubmittingReport(true);
+    try {
+      await momentsApi.report(moment.id, {
+        reason: reportReason,
+        details: reportDetails.trim() || undefined,
+      });
+      setReportOpen(false);
+      setReportDetails("");
+      toast({
+        title: "Report submitted",
+        description: "Thank you for helping keep the community safe.",
+        variant: "success",
+      });
+    } catch (cause) {
+      toast({
+        title: "Could not submit report",
+        description: cause instanceof ApiError ? cause.message : undefined,
+        variant: "error",
+      });
+    } finally {
+      setSubmittingReport(false);
+    }
+  };
+
   return (
     <article className="border-border-subtle bg-surface-raised rounded-xl border p-4 shadow-sm">
       <header className="flex items-center justify-between gap-3">
@@ -135,20 +229,143 @@ export function MomentCard({
             </p>
           </div>
         </div>
-        {isAuthor ? (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={() => void handleDelete()}
-            loading={deleting}
-            aria-label="Delete moment"
-          >
-            Delete
-          </Button>
-        ) : null}
+        <div className="flex items-center gap-1">
+          {isAuthor ? (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  setEditBody(moment.body);
+                  setEditVisibility(moment.visibility);
+                  setIsEditing((prev) => !prev);
+                }}
+                aria-label="Edit moment"
+              >
+                {isEditing ? "Cancel" : "Edit"}
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void handleDelete()}
+                loading={deleting}
+                aria-label="Delete moment"
+              >
+                Delete
+              </Button>
+            </>
+          ) : (
+            <>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => void handleHide()}
+                loading={hiding}
+                aria-label="Hide moment"
+              >
+                Hide
+              </Button>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => setReportOpen((prev) => !prev)}
+                aria-label="Report moment"
+              >
+                Report
+              </Button>
+            </>
+          )}
+        </div>
       </header>
 
-      {moment.body ? (
+      {/* Report Post Form */}
+      {reportOpen ? (
+        <form
+          onSubmit={handleReport}
+          className="border-border-subtle bg-surface mt-3 rounded-lg border p-3 text-sm"
+        >
+          <p className="text-ink font-semibold text-xs mb-2">Report Post</p>
+          <div className="flex flex-col gap-2">
+            <select
+              value={reportReason}
+              onChange={(e) => setReportReason(e.target.value)}
+              aria-label="Report Reason"
+              className="border-border-subtle bg-surface text-ink rounded-md border px-2 py-1 text-xs"
+            >
+              <option value="spam">Spam / Advertising</option>
+              <option value="harassment">Harassment or Hate Speech</option>
+              <option value="inappropriate">Inappropriate Content</option>
+              <option value="misinformation">Misinformation</option>
+              <option value="other">Other</option>
+            </select>
+            <textarea
+              value={reportDetails}
+              onChange={(e) => setReportDetails(e.target.value)}
+              placeholder="Optional additional details..."
+              rows={2}
+              className="border-border-subtle bg-surface text-ink resize-none rounded-md border px-2 py-1 text-xs"
+            />
+            <div className="flex justify-end gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setReportOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button type="submit" size="sm" loading={submittingReport}>
+                Submit Report
+              </Button>
+            </div>
+          </div>
+        </form>
+      ) : null}
+
+      {/* Body / Inline Edit Mode */}
+      {isEditing ? (
+        <div className="mt-3 flex flex-col gap-2">
+          <textarea
+            value={editBody}
+            onChange={(e) => setEditBody(e.target.value)}
+            rows={3}
+            aria-label="Edit post body"
+            className="border-border-subtle bg-surface text-ink w-full resize-none rounded-lg border px-3 py-2 text-sm"
+          />
+          <div className="flex items-center justify-between gap-2">
+            <select
+              value={editVisibility}
+              onChange={(e) =>
+                setEditVisibility(e.target.value as "friends" | "public" | "private")
+              }
+              aria-label="Edit visibility"
+              className="border-border-subtle bg-surface text-ink rounded-md border px-2 py-1 text-xs"
+            >
+              <option value="friends">Friends</option>
+              <option value="public">Public</option>
+              <option value="private">Only me</option>
+            </select>
+            <div className="flex gap-2">
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                onClick={() => setIsEditing(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                type="button"
+                size="sm"
+                loading={savingEdit}
+                onClick={() => void handleSaveEdit()}
+              >
+                Save
+              </Button>
+            </div>
+          </div>
+        </div>
+      ) : moment.body ? (
         <p className="text-ink mt-3 text-sm leading-relaxed whitespace-pre-wrap">
           {moment.body}
         </p>
@@ -213,20 +430,37 @@ export function MomentCard({
             <ul className="flex flex-col gap-2">
               {comments.map((comment) => (
                 <li key={comment.id} className="text-sm">
+                  {comment.reply_to_author ? (
+                    <div className="text-ink-muted text-xs mb-0.5">
+                      ↳ replying to @{comment.reply_to_author.display_name}
+                    </div>
+                  ) : null}
                   <span className="text-ink font-medium">
                     {comment.author.display_name}
                   </span>{" "}
                   <span className="text-ink">{comment.body}</span>{" "}
-                  {comment.author.id === currentUserId ? (
+                  <div className="inline-flex gap-2 text-xs text-ink-muted">
                     <button
                       type="button"
-                      onClick={() => void handleDeleteComment(comment)}
-                      className="text-ink-muted hover:text-ink text-xs"
-                      aria-label="Delete comment"
+                      onClick={() => {
+                        setReplyingTo(comment);
+                      }}
+                      className="hover:text-ink"
+                      aria-label={`Reply to ${comment.author.display_name}`}
                     >
-                      delete
+                      reply
                     </button>
-                  ) : null}
+                    {comment.author.id === currentUserId || isAuthor ? (
+                      <button
+                        type="button"
+                        onClick={() => void handleDeleteComment(comment)}
+                        className="hover:text-ink"
+                        aria-label="Delete comment"
+                      >
+                        delete
+                      </button>
+                    ) : null}
+                  </div>
                 </li>
               ))}
             </ul>
@@ -243,11 +477,35 @@ export function MomentCard({
             </button>
           ) : null}
 
+          {/* Reply indicator banner */}
+          {replyingTo ? (
+            <div className="bg-surface border-border-subtle mt-2 flex items-center justify-between rounded-lg border px-2.5 py-1 text-xs">
+              <span className="text-ink-muted">
+                Replying to{" "}
+                <strong className="text-ink font-medium">
+                  @{replyingTo.author.display_name}
+                </strong>
+              </span>
+              <button
+                type="button"
+                onClick={() => setReplyingTo(null)}
+                className="text-ink-muted hover:text-ink font-bold"
+                aria-label="Cancel reply"
+              >
+                ×
+              </button>
+            </div>
+          ) : null}
+
           <form onSubmit={handleAddComment} className="mt-3 flex gap-2">
             <input
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
-              placeholder="Write a comment…"
+              placeholder={
+                replyingTo
+                  ? `Reply to @${replyingTo.author.display_name}…`
+                  : "Write a comment…"
+              }
               aria-label="Write a comment"
               className="border-border-subtle bg-surface flex-1 rounded-lg border px-3 py-1.5 text-sm"
             />

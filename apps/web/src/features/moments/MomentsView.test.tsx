@@ -24,7 +24,10 @@ const h = vi.hoisted(() => {
     subscribe,
     listFeed: vi.fn(),
     create: vi.fn(),
+    update: vi.fn(),
     remove: vi.fn(),
+    hide: vi.fn(),
+    report: vi.fn(),
     like: vi.fn(),
     unlike: vi.fn(),
     listComments: vi.fn(),
@@ -69,7 +72,10 @@ vi.mock("@/features/moments/api", () => ({
   momentsApi: {
     listFeed: h.listFeed,
     create: h.create,
+    update: h.update,
     remove: h.remove,
+    hide: h.hide,
+    report: h.report,
     like: h.like,
     unlike: h.unlike,
     listComments: h.listComments,
@@ -119,7 +125,10 @@ describe("MomentsView", () => {
     h.subscribe.mockClear();
     h.listFeed.mockReset();
     h.create.mockReset();
+    h.update.mockReset();
     h.remove.mockReset();
+    h.hide.mockReset();
+    h.report.mockReset();
     h.like.mockReset();
     h.unlike.mockReset();
     h.listComments.mockReset();
@@ -203,5 +212,92 @@ describe("MomentsView", () => {
 
     expect(await screen.findByText("Nice!")).toBeInTheDocument();
     expect(h.addComment).toHaveBeenCalledWith(h.M1, "Nice!");
+  });
+
+  it("edits an authored moment", async () => {
+    const myMoment = moment({
+      id: h.M2,
+      body: "My initial post",
+      author: { id: h.ME, username: "me", display_name: "Me", avatar_url: null },
+    });
+    h.listFeed.mockResolvedValue({ items: [myMoment], next_cursor: null });
+    h.update.mockResolvedValue({ ...myMoment, body: "My edited post" });
+
+    renderView();
+    expect(await screen.findByText("My initial post")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Edit moment" }));
+    const editInput = screen.getByLabelText("Edit post body");
+    await userEvent.clear(editInput);
+    await userEvent.type(editInput, "My edited post");
+    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+
+    expect(await screen.findByText("My edited post")).toBeInTheDocument();
+    expect(h.update).toHaveBeenCalledWith(h.M2, {
+      body: "My edited post",
+      visibility: "friends",
+    });
+  });
+
+  it("hides a moment from the feed", async () => {
+    h.hide.mockResolvedValue(undefined);
+    renderView();
+    expect(await screen.findByText("Hello from Bob")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Hide moment" }));
+    expect(h.hide).toHaveBeenCalledWith(h.M1);
+    await waitFor(() => {
+      expect(screen.queryByText("Hello from Bob")).not.toBeInTheDocument();
+    });
+  });
+
+  it("reports a moment with reason", async () => {
+    h.report.mockResolvedValue(undefined);
+    renderView();
+    expect(await screen.findByText("Hello from Bob")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Report moment" }));
+    expect(screen.getByText("Report Post")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Submit Report" }));
+    expect(h.report).toHaveBeenCalledWith(h.M1, {
+      reason: "spam",
+      details: undefined,
+    });
+  });
+
+  it("replies to an existing comment", async () => {
+    const parentComment = {
+      id: "99999999-9999-9999-9999-999999999999",
+      moment_id: h.M1,
+      author: { id: h.BOB, username: "bob", display_name: "Bob", avatar_url: null },
+      body: "Great post!",
+      created_at: "2026-01-01T00:00:00Z",
+    };
+    h.listComments.mockResolvedValue({ items: [parentComment], next_cursor: null });
+    h.addComment.mockResolvedValue({
+      id: "88888888-8888-8888-8888-888888888888",
+      moment_id: h.M1,
+      author: { id: h.ME, username: "me", display_name: "Me", avatar_url: null },
+      reply_to_id: parentComment.id,
+      reply_to_author: parentComment.author,
+      body: "Thanks Bob!",
+      created_at: "2026-01-01T00:01:00Z",
+    });
+
+    renderView();
+    await screen.findByText("Hello from Bob");
+
+    await userEvent.click(screen.getByRole("button", { name: "Comments" }));
+    expect(await screen.findByText("Great post!")).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: "Reply to Bob" }));
+    expect(screen.getByText(/Replying to/)).toBeInTheDocument();
+
+    await userEvent.type(screen.getByLabelText("Write a comment"), "Thanks Bob!");
+    await userEvent.click(screen.getByRole("button", { name: /^Comment$/ }));
+
+    expect(await screen.findByText("Thanks Bob!")).toBeInTheDocument();
+    expect(h.addComment).toHaveBeenCalledWith(h.M1, "Thanks Bob!", parentComment.id);
   });
 });

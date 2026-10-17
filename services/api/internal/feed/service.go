@@ -23,10 +23,13 @@ type Publisher interface {
 // store is the persistence surface the service depends on. *Store implements
 // it; unit tests use an in-memory fake.
 type store interface {
-	CreateMoment(ctx context.Context, author uuid.UUID, body, visibility string, media []MediaInput) (uuid.UUID, error)
+	CreateMoment(ctx context.Context, author uuid.UUID, body, visibility string, media []MediaInput, excludedUsers []uuid.UUID) (uuid.UUID, error)
+	UpdateMoment(ctx context.Context, id, author uuid.UUID, body, visibility *string) (Moment, error)
 	GetMoment(ctx context.Context, viewer, id uuid.UUID) (Moment, error)
 	ListFeed(ctx context.Context, viewer uuid.UUID, afterCreated *time.Time, afterID *uuid.UUID, limit int) ([]Moment, error)
 	SoftDeleteMoment(ctx context.Context, id uuid.UUID) error
+	HideMoment(ctx context.Context, viewer, momentID uuid.UUID) error
+	ReportMoment(ctx context.Context, reporter, momentID uuid.UUID, reason, details string) error
 	IsFriend(ctx context.Context, viewer, author uuid.UUID) (bool, error)
 	FriendIDs(ctx context.Context, viewer uuid.UUID) ([]uuid.UUID, error)
 	Like(ctx context.Context, momentID, user uuid.UUID) (bool, error)
@@ -34,7 +37,7 @@ type store interface {
 	LikeCount(ctx context.Context, momentID uuid.UUID) (int64, error)
 	ListComments(ctx context.Context, momentID uuid.UUID, afterCreated *time.Time, afterID *uuid.UUID, limit int) ([]Comment, error)
 	GetComment(ctx context.Context, id uuid.UUID) (Comment, error)
-	AddComment(ctx context.Context, momentID, author uuid.UUID, body string) (Comment, error)
+	AddComment(ctx context.Context, momentID, author uuid.UUID, body string, replyToID *uuid.UUID) (Comment, error)
 	SoftDeleteComment(ctx context.Context, commentID, caller uuid.UUID) (bool, error)
 }
 
@@ -49,9 +52,10 @@ func NewService(st store, pub Publisher) *Service { return &Service{st: st, pub:
 
 // CreateMomentInput is a request to publish a moment.
 type CreateMomentInput struct {
-	Body       string
-	Visibility string
-	Media      []MediaInput
+	Body            string
+	Visibility      string
+	ExcludedUserIDs []string
+	Media           []MediaInput
 }
 
 // Create validates and stores a moment, then notifies the author's friends.
@@ -88,7 +92,14 @@ func (s *Service) Create(ctx context.Context, author Author, in CreateMomentInpu
 		return Moment{}, ErrEmptyMoment
 	}
 
-	id, err := s.st.CreateMoment(ctx, author.ID, body, visibility, media)
+	var excludedUsers []uuid.UUID
+	for _, raw := range in.ExcludedUserIDs {
+		if uid, err := uuid.Parse(strings.TrimSpace(raw)); err == nil {
+			excludedUsers = append(excludedUsers, uid)
+		}
+	}
+
+	id, err := s.st.CreateMoment(ctx, author.ID, body, visibility, media, excludedUsers)
 	if err != nil {
 		return Moment{}, err
 	}
@@ -100,28 +111,28 @@ func (s *Service) Create(ctx context.Context, author Author, in CreateMomentInpu
 	return moment, nil
 }
 
-// Feed returns a page of moments visible to the viewer plus the next cursor.
-func (s *Service) Feed(ctx context.Context, viewer uuid.UUID, cursor string, limit int) ([]Moment, string, error) {
-	size := clampLimit(limit)
-	afterCreated, afterID, err := decodeCursor(cursor)
-	if err != nil {
-		return nil, "", &ValidationError{Field: "cursor", Message: "is not a valid cursor"}
+// Update modifies an existing moment's text and/or visibility (author only).
+func (s *Service) Update(ctx context.Context, author, id uuid.UUID, in UpdateMomentInput) (Moment, error) {
+	var body *string
+	if in.Body != nil {
+		b := strings.TrimSpace(*in.Body)
+		if len([]rune(b)) > maxBodyRunes {
+			return Moment{}, &ValidationError{Field: "body", Message: "must be at most 2000 characters"}
+		}
+		body = &b
 	}
-
-	moments, err := s.st.ListFeed(ctx, viewer, afterCreated, afterID, size+1)
-	if err != nil {
-		return nil, "", err
+	var visibility *string
+	if in.Visibility != nil {
+		v, err := normalizeVisibility(*in.Visibility)
+		if err != nil {
+			return Moment{}, err
+		}
+		visibility = &v
 	}
-	next := ""
-	if len(moments) > size {
-		last := moments[size-1]
-		next = encodeCursor(last.CreatedAt, last.ID)
-		moments = moments[:size]
-	}
-	return moments, next, nil
+	return s.st.UpdateMoment(ctx, id, author, body, visibility)
 }
 
-// Get returns a single moment if the viewer is allowed to see it.
+// Get returns a single moment if visible to the viewer.
 func (s *Service) Get(ctx context.Context, viewer, id uuid.UUID) (Moment, error) {
 	moment, err := s.st.GetMoment(ctx, viewer, id)
 	if err != nil {
@@ -133,7 +144,28 @@ func (s *Service) Get(ctx context.Context, viewer, id uuid.UUID) (Moment, error)
 	return moment, nil
 }
 
-// Delete soft-deletes a moment the viewer authored.
+// Feed returns one page of moments visible to the viewer, newest first.
+func (s *Service) Feed(ctx context.Context, viewer uuid.UUID, cursor string, limit int) ([]Moment, string, error) {
+	created, afterID, err := decodeCursor(cursor)
+	if err != nil {
+		return nil, "", &ValidationError{Field: "cursor", Message: "invalid cursor"}
+	}
+	clamped := clampLimit(limit)
+	// Fetch one extra to know whether a next page exists.
+	moments, err := s.st.ListFeed(ctx, viewer, created, afterID, clamped+1)
+	if err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(moments) > clamped {
+		last := moments[clamped-1]
+		next = encodeCursor(last.CreatedAt, last.ID)
+		moments = moments[:clamped]
+	}
+	return moments, next, nil
+}
+
+// Delete removes a moment if the viewer is the author.
 func (s *Service) Delete(ctx context.Context, viewer, id uuid.UUID) error {
 	moment, err := s.st.GetMoment(ctx, viewer, id)
 	if err != nil {
@@ -145,62 +177,75 @@ func (s *Service) Delete(ctx context.Context, viewer, id uuid.UUID) error {
 	return s.st.SoftDeleteMoment(ctx, id)
 }
 
-// Like adds a like (idempotent) and returns the resulting count.
-func (s *Service) Like(ctx context.Context, viewer, id uuid.UUID) (int64, error) {
-	if err := s.ensureVisible(ctx, viewer, id); err != nil {
-		return 0, err
-	}
-	if _, err := s.st.Like(ctx, id, viewer); err != nil {
-		return 0, err
-	}
-	return s.st.LikeCount(ctx, id)
+// Hide hides a moment from the viewer's feed.
+func (s *Service) Hide(ctx context.Context, viewer, id uuid.UUID) error {
+	return s.st.HideMoment(ctx, viewer, id)
 }
 
-// Unlike removes a like (idempotent) and returns the resulting count.
-func (s *Service) Unlike(ctx context.Context, viewer, id uuid.UUID) (int64, error) {
-	if err := s.ensureVisible(ctx, viewer, id); err != nil {
-		return 0, err
+// Report files a report against a moment.
+func (s *Service) Report(ctx context.Context, reporter, id uuid.UUID, in ReportInput) error {
+	reason := strings.TrimSpace(in.Reason)
+	if reason == "" {
+		return &ValidationError{Field: "reason", Message: "reason is required"}
 	}
-	if _, err := s.st.Unlike(ctx, id, viewer); err != nil {
-		return 0, err
-	}
-	return s.st.LikeCount(ctx, id)
+	return s.st.ReportMoment(ctx, reporter, id, reason, strings.TrimSpace(in.Details))
 }
 
-// Comments returns a page of comments oldest-first plus the next cursor.
+// Like adds a like from the viewer, returning the updated count.
+func (s *Service) Like(ctx context.Context, viewer, momentID uuid.UUID) (int64, error) {
+	if err := s.ensureVisible(ctx, viewer, momentID); err != nil {
+		return 0, err
+	}
+	if _, err := s.st.Like(ctx, momentID, viewer); err != nil {
+		return 0, err
+	}
+	return s.st.LikeCount(ctx, momentID)
+}
+
+// Unlike removes a like from the viewer, returning the updated count.
+func (s *Service) Unlike(ctx context.Context, viewer, momentID uuid.UUID) (int64, error) {
+	if err := s.ensureVisible(ctx, viewer, momentID); err != nil {
+		return 0, err
+	}
+	if _, err := s.st.Unlike(ctx, momentID, viewer); err != nil {
+		return 0, err
+	}
+	return s.st.LikeCount(ctx, momentID)
+}
+
+// Comments returns one page of comments for a visible moment, oldest first.
 func (s *Service) Comments(ctx context.Context, viewer, momentID uuid.UUID, cursor string, limit int) ([]Comment, string, error) {
 	if err := s.ensureVisible(ctx, viewer, momentID); err != nil {
 		return nil, "", err
 	}
-	size := clampLimit(limit)
-	afterCreated, afterID, err := decodeCursor(cursor)
+	created, afterID, err := decodeCursor(cursor)
 	if err != nil {
-		return nil, "", &ValidationError{Field: "cursor", Message: "is not a valid cursor"}
+		return nil, "", &ValidationError{Field: "cursor", Message: "invalid cursor"}
 	}
-
-	comments, err := s.st.ListComments(ctx, momentID, afterCreated, afterID, size+1)
+	clamped := clampLimit(limit)
+	comments, err := s.st.ListComments(ctx, momentID, created, afterID, clamped+1)
 	if err != nil {
 		return nil, "", err
 	}
 	next := ""
-	if len(comments) > size {
-		last := comments[size-1]
+	if len(comments) > clamped {
+		last := comments[clamped-1]
 		next = encodeCursor(last.CreatedAt, last.ID)
-		comments = comments[:size]
+		comments = comments[:clamped]
 	}
 	return comments, next, nil
 }
 
-// AddComment appends a comment to a moment the viewer can see.
-func (s *Service) AddComment(ctx context.Context, viewer uuid.UUID, momentID uuid.UUID, body string) (Comment, error) {
+// AddComment appends a comment (or reply) to a visible moment.
+func (s *Service) AddComment(ctx context.Context, viewer, momentID uuid.UUID, text string, replyToID *uuid.UUID) (Comment, error) {
 	if err := s.ensureVisible(ctx, viewer, momentID); err != nil {
 		return Comment{}, err
 	}
-	text := strings.TrimSpace(body)
+	text = strings.TrimSpace(text)
 	if text == "" || len([]rune(text)) > maxCommentRunes {
 		return Comment{}, &ValidationError{Field: "body", Message: "must be between 1 and 1000 characters"}
 	}
-	return s.st.AddComment(ctx, momentID, viewer, text)
+	return s.st.AddComment(ctx, momentID, viewer, text, replyToID)
 }
 
 // DeleteComment removes a comment when the viewer wrote it or authored the
@@ -216,8 +261,7 @@ func (s *Service) DeleteComment(ctx context.Context, viewer, commentID uuid.UUID
 	return nil
 }
 
-// ensureVisible loads a moment and enforces visibility, collapsing "not found"
-// and "not allowed" into the same error so private moments cannot be probed.
+// ensureVisible loads a moment and enforces visibility.
 func (s *Service) ensureVisible(ctx context.Context, viewer, id uuid.UUID) error {
 	moment, err := s.st.GetMoment(ctx, viewer, id)
 	if err != nil {
@@ -245,7 +289,6 @@ func (s *Service) authorizeView(ctx context.Context, moment Moment, viewer uuid.
 	return ErrMomentNotFound
 }
 
-// ensureVisible helper reused by Like/Unlike/Comments/AddComment.
 func (s *Service) fanOut(ctx context.Context, author uuid.UUID, moment Moment) {
 	if s.pub == nil || moment.Visibility == VisibilityPrivate {
 		return
@@ -287,8 +330,7 @@ func encodeCursor(t time.Time, id uuid.UUID) string {
 	return strconv.FormatInt(t.UTC().UnixMicro(), 10) + ":" + id.String()
 }
 
-// decodeCursor parses "<unix-micro>:<uuid>". An empty cursor means "from the
-// start" and returns nil pointers.
+// decodeCursor parses "<unix-micro>:<uuid>".
 func decodeCursor(cursor string) (*time.Time, *uuid.UUID, error) {
 	cursor = strings.TrimSpace(cursor)
 	if cursor == "" {

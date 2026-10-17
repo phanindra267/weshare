@@ -3,6 +3,7 @@ package feed
 import (
 	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -33,7 +34,10 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup, requireAuth gin.HandlerFun
 	g.GET("", h.Feed)
 	g.POST("", h.Create)
 	g.GET("/:id", h.Get)
+	g.PATCH("/:id", h.Update)
 	g.DELETE("/:id", h.Delete)
+	g.POST("/:id/hide", h.Hide)
+	g.POST("/:id/report", h.Report)
 	g.POST("/:id/likes", h.Like)
 	g.DELETE("/:id/likes", h.Unlike)
 	g.GET("/:id/comments", h.Comments)
@@ -83,9 +87,10 @@ func (h *Handler) Create(c *gin.Context) {
 		visibility = c.Query("visibility")
 	}
 	moment, err := h.svc.Create(c.Request.Context(), toAuthor(user), CreateMomentInput{
-		Body:       body.Body,
-		Visibility: visibility,
-		Media:      media,
+		Body:            body.Body,
+		Visibility:      visibility,
+		ExcludedUserIDs: body.ExcludedUserIDs,
+		Media:           media,
 	})
 	if err != nil {
 		h.fail(c, err)
@@ -113,6 +118,33 @@ func (h *Handler) Get(c *gin.Context) {
 	httpx.OK(c, toMomentResponse(moment))
 }
 
+// Update modifies a moment authored by the caller.
+func (h *Handler) Update(c *gin.Context) {
+	user, ok := auth.CurrentUser(c)
+	if !ok {
+		httpx.Error(c, httpx.Unauthorized(""))
+		return
+	}
+	id, ok := h.momentID(c)
+	if !ok {
+		return
+	}
+	var body UpdateMomentRequest
+	if err := httpx.BindJSON(c, &body); err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	moment, err := h.svc.Update(c.Request.Context(), user.ID, id, UpdateMomentInput{
+		Body:       body.Body,
+		Visibility: body.Visibility,
+	})
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	httpx.OK(c, toMomentResponse(moment))
+}
+
 // Delete soft-deletes a moment the caller authored.
 func (h *Handler) Delete(c *gin.Context) {
 	user, ok := auth.CurrentUser(c)
@@ -125,6 +157,54 @@ func (h *Handler) Delete(c *gin.Context) {
 		return
 	}
 	if err := h.svc.Delete(c.Request.Context(), user.ID, id); err != nil {
+		h.fail(c, err)
+		return
+	}
+	httpx.NoContent(c)
+}
+
+// Hide removes a moment from the caller's feed.
+func (h *Handler) Hide(c *gin.Context) {
+	user, ok := auth.CurrentUser(c)
+	if !ok {
+		httpx.Error(c, httpx.Unauthorized(""))
+		return
+	}
+	id, ok := h.momentID(c)
+	if !ok {
+		return
+	}
+	if err := h.svc.Hide(c.Request.Context(), user.ID, id); err != nil {
+		h.fail(c, err)
+		return
+	}
+	httpx.NoContent(c)
+}
+
+// Report files a report against a moment.
+func (h *Handler) Report(c *gin.Context) {
+	user, ok := auth.CurrentUser(c)
+	if !ok {
+		httpx.Error(c, httpx.Unauthorized(""))
+		return
+	}
+	id, ok := h.momentID(c)
+	if !ok {
+		return
+	}
+	var body ReportMomentRequest
+	if err := httpx.BindJSON(c, &body); err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	details := ""
+	if body.Details != nil {
+		details = *body.Details
+	}
+	if err := h.svc.Report(c.Request.Context(), user.ID, id, ReportInput{
+		Reason:  body.Reason,
+		Details: details,
+	}); err != nil {
 		h.fail(c, err)
 		return
 	}
@@ -208,7 +288,13 @@ func (h *Handler) AddComment(c *gin.Context) {
 		httpx.Error(c, err)
 		return
 	}
-	comment, err := h.svc.AddComment(c.Request.Context(), user.ID, id, body.Body)
+	var replyToID *uuid.UUID
+	if body.ReplyToID != nil && strings.TrimSpace(*body.ReplyToID) != "" {
+		if parsed, err := uuid.Parse(strings.TrimSpace(*body.ReplyToID)); err == nil {
+			replyToID = &parsed
+		}
+	}
+	comment, err := h.svc.AddComment(c.Request.Context(), user.ID, id, body.Body, replyToID)
 	if err != nil {
 		h.fail(c, err)
 		return
@@ -259,7 +345,7 @@ func (h *Handler) fail(c *gin.Context, err error) {
 	case errors.Is(err, ErrMomentNotFound), errors.Is(err, ErrCommentNotFound):
 		httpx.Error(c, httpx.NotFound("The requested post was not found."))
 	case errors.Is(err, ErrNotAuthor):
-		httpx.Error(c, httpx.Forbidden("Only the author can delete this post."))
+		httpx.Error(c, httpx.Forbidden("Only the author can modify this post."))
 	case errors.Is(err, ErrEmptyMoment):
 		httpx.Error(c, httpx.Validation("Add some text or a photo to share.",
 			gin.H{"body": "a moment needs text or media"}))

@@ -30,6 +30,8 @@ export const commentSchema = z.object({
   id: z.string().uuid(),
   moment_id: z.string().uuid(),
   author: authorSchema,
+  reply_to_id: z.string().uuid().nullable().optional(),
+  reply_to_author: authorSchema.nullable().optional(),
   body: z.string(),
   created_at: z.string(),
 });
@@ -44,6 +46,16 @@ export type Media = z.infer<typeof mediaSchema>;
 export type Moment = z.infer<typeof momentSchema>;
 export type Comment = z.infer<typeof commentSchema>;
 export type MomentPage = z.infer<typeof momentPageSchema>;
+
+export type UpdateMomentInput = {
+  body?: string;
+  visibility?: "friends" | "public" | "private";
+};
+
+export type ReportMomentInput = {
+  reason: string;
+  details?: string;
+};
 
 /** Realtime `moment.created` payload pushed to a user's friends. */
 export interface MomentCreatedEvent {

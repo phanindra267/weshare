@@ -758,6 +758,45 @@ paths:
           $ref: "#/components/responses/Error"
         "404":
           $ref: "#/components/responses/Error"
+    patch:
+      tags: [Moments]
+      summary: Update a moment
+      description: >
+        Updates the body and/or visibility of a moment. Only the author may update.
+      operationId: updateMoment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UpdateMomentRequest"
+      responses:
+        "200":
+          description: The updated moment.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Moment"
+        "401":
+          $ref: "#/components/responses/Error"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
     delete:
       tags: [Moments]
       summary: Delete a moment
@@ -780,6 +819,56 @@ paths:
         "403":
           $ref: "#/components/responses/Error"
         "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/moments/{id}/hide:
+    post:
+      tags: [Moments]
+      summary: Hide a moment
+      description: Hides a moment from the caller's feed.
+      operationId: hideMoment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Moment hidden.
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/moments/{id}/report:
+    post:
+      tags: [Moments]
+      summary: Report a moment
+      description: Files a report against a moment for moderation.
+      operationId: reportMoment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReportMomentRequest"
+      responses:
+        "204":
+          description: Report submitted.
+        "401":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
           $ref: "#/components/responses/Error"
 
   /api/v1/moments/{id}/likes:
@@ -1179,6 +1268,8 @@ components:
         id: { type: string, format: uuid }
         moment_id: { type: string, format: uuid }
         author: { $ref: "#/components/schemas/MomentAuthor" }
+        reply_to_id: { type: string, format: uuid }
+        reply_to_author: { $ref: "#/components/schemas/MomentAuthor" }
         body: { type: string }
         created_at: { type: string, format: date-time }
       required: [id, moment_id, author, body, created_at]
@@ -1244,12 +1335,42 @@ components:
           type: string
           enum: [friends, public, private]
           default: friends
+        excluded_user_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Optional list of contact IDs to exclude from viewing this moment.
         media:
           type: array
           maxItems: 9
           items:
             $ref: "#/components/schemas/MediaInputRequest"
       minProperties: 1
+
+    UpdateMomentRequest:
+      type: object
+      description: Body of PATCH /api/v1/moments/{id}.
+      properties:
+        body:
+          type: string
+          description: Updated moment body text (max 2000 characters).
+        visibility:
+          type: string
+          enum: [friends, public, private]
+      minProperties: 1
+
+    ReportMomentRequest:
+      type: object
+      description: Body of POST /api/v1/moments/{id}/report.
+      properties:
+        reason:
+          type: string
+          description: Reason for reporting (e.g. spam, harassment).
+        details:
+          type: string
+          description: Optional supplementary details.
+      required: [reason]
 
     AddCommentRequest:
       type: object
@@ -1258,6 +1379,10 @@ components:
           type: string
           minLength: 1
           maxLength: 1000
+        reply_to_id:
+          type: string
+          format: uuid
+          description: Optional ID of the parent comment being replied to.
       required: [body]
 
     MediaInputRequest:

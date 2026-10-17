@@ -1,5 +1,11 @@
 import { api } from "@/lib/api";
-import type { Comment, Moment, MomentPage } from "./types";
+import type {
+  Comment,
+  Moment,
+  MomentPage,
+  ReportMomentInput,
+  UpdateMomentInput,
+} from "./types";
 
 export type ListFeedParams = {
   cursor?: string | null;
@@ -14,6 +20,7 @@ export type ListCommentsParams = {
 export type CreateMomentInput = {
   body?: string;
   visibility?: "friends" | "public" | "private";
+  excluded_user_ids?: string[];
   media?: { url: string; media_type: string }[];
 };
 
@@ -36,14 +43,22 @@ function pageQuery(params: { cursor?: string | null; limit?: number }): string {
 
 export const momentsApi = {
   listFeed: (params: ListFeedParams = {}) =>
-    api.get<MomentPage>(`/api/v1/moments${pageQuery(params)}`),
+  api.get<MomentPage>(`/api/v1/moments${pageQuery(params)}`),
 
   create: (input: CreateMomentInput) =>
     api.post<Moment>("/api/v1/moments", { json: input }),
 
   get: (id: string) => api.get<Moment>(`/api/v1/moments/${id}`),
 
+  update: (id: string, input: UpdateMomentInput) =>
+    api.patch<Moment>(`/api/v1/moments/${id}`, { json: input }),
+
   remove: (id: string) => api.delete<void>(`/api/v1/moments/${id}`),
+
+  hide: (id: string) => api.post<void>(`/api/v1/moments/${id}/hide`),
+
+  report: (id: string, input: ReportMomentInput) =>
+    api.post<void>(`/api/v1/moments/${id}/report`, { json: input }),
 
   like: (id: string) =>
     api.post<{ like_count: number; liked: boolean }>(
@@ -60,8 +75,10 @@ export const momentsApi = {
       `/api/v1/moments/${id}/comments${pageQuery(params)}`,
     ),
 
-  addComment: (id: string, body: string) =>
-    api.post<Comment>(`/api/v1/moments/${id}/comments`, { json: { body } }),
+  addComment: (id: string, body: string, replyToId?: string) =>
+    api.post<Comment>(`/api/v1/moments/${id}/comments`, {
+      json: { body, ...(replyToId ? { reply_to_id: replyToId } : {}) },
+    }),
 
   deleteComment: (id: string, commentId: string) =>
     api.delete<void>(`/api/v1/moments/${id}/comments/${commentId}`),

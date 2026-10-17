@@ -1,7 +1,7 @@
 # Phase Status
 
 **Project:** WeShare
-**Phase:** 6 — Media, Attachments, and Voice Messages
+**Phase:** 7 — Moments and Social Feed
 **Status:** Verified
 **Last updated:** 2026-10-17
 
@@ -16,8 +16,33 @@
 | 4 | Groups, Media, Voice | Verified |
 | 5 | Moments, Social, Discover | Verified |
 | 6 | Media, Attachments, and Voice Messages | Verified |
+| 7 | Moments and Social Feed | Verified |
 
 Roadmap reference: `docs/IMPLEMENTATION_AUDIT.md` ("Missing / planned by phase").
+
+---
+
+## Phase 7 — Moments and Social Feed
+
+### Acceptance criteria
+
+| Item | Status | Notes |
+|---|---|---|
+| Create text and media posts | Completed | Create moments with up to 9 photos/videos and text body up to 2000 characters |
+| Edit and delete your own posts | Completed | Inline editing with `PATCH /api/v1/moments/:id` and author soft deletion via `DELETE /api/v1/moments/:id` |
+| Display authors, timestamps, and media previews | Completed | Author display name, avatar, relative timestamp, photo grid, and `<video controls>` |
+| Implement feed pagination | Completed | Keyset cursor-based pagination (`cursor` & `limit`) with next-page detection |
+| Like and unlike posts | Completed | Idempotent reactions with `POST/DELETE /api/v1/moments/:id/likes` returning updated count |
+| Comment on posts | Completed | Expandable comment thread with `POST /api/v1/moments/:id/comments` |
+| Reply to comments | Completed | Threaded replies supporting `reply_to_id` and joined `reply_to_author` profile |
+| Delete permitted comments | Completed | Both comment author and moment author are authorized to soft-delete comments |
+| Prevent duplicate likes and requests | Completed | Unique constraints on database and idempotent toggle handlers prevent duplicates |
+| Implement public and contacts-only visibility | Completed | `friends` (default), `public`, and `private` visibilities strictly enforced in SQL queries |
+| Implement restricted audiences or excluded-user lists | Completed | `moment_exclusions` table and API support to exclude specific contacts from viewing moments |
+| Enforce visibility and blocking rules on backend | Completed | Bidirectional contact blocking filter in SQL prevents blocked users from seeing or interacting with posts |
+| Hide or report posts | Completed | `POST /api/v1/moments/:id/hide` filters post from viewer's feed; `POST /api/v1/moments/:id/report` persists report |
+| Add relevant loading, empty, and error states | Completed | Feed skeleton loaders, EmptyState components, ErrorMessage with retry, loading buttons, and toast notifications |
+| Persist posts, comments, likes, and media associations | Completed | PostgreSQL migration `000011_moments_features` adds exclusions, hidden posts, reports, and replies |
 
 ---
 

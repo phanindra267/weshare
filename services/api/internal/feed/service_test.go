@@ -36,12 +36,15 @@ func (p *recordingPublisher) PublishToUser(userID uuid.UUID, event any) bool {
 
 // fakeStore is a configurable in-memory implementation of the store interface.
 type fakeStore struct {
-	moments     map[uuid.UUID]Moment
-	media       map[uuid.UUID][]Media
-	likes       map[uuid.UUID]map[uuid.UUID]bool
-	comments    map[uuid.UUID][]Comment
-	commentByID map[uuid.UUID]Comment
-	friends     map[uuid.UUID]map[uuid.UUID]bool
+	moments       map[uuid.UUID]Moment
+	media         map[uuid.UUID][]Media
+	likes         map[uuid.UUID]map[uuid.UUID]bool
+	comments      map[uuid.UUID][]Comment
+	commentByID   map[uuid.UUID]Comment
+	friends       map[uuid.UUID]map[uuid.UUID]bool
+	excludedUsers map[uuid.UUID][]uuid.UUID
+	hiddenMoments map[uuid.UUID]map[uuid.UUID]bool
+	reports       []reportedEntry
 
 	// configurable results / errors
 	feed               []Moment
@@ -57,16 +60,26 @@ type fakeStore struct {
 	deleteMomentErr    error
 	deleteCommentOK    bool
 	deleteCommentOKSet bool
+	updateErr          error
+	hideErr            error
+	reportErr          error
+}
+
+type reportedEntry struct {
+	reporter, momentID uuid.UUID
+	reason, details    string
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		moments:     map[uuid.UUID]Moment{},
-		media:       map[uuid.UUID][]Media{},
-		likes:       map[uuid.UUID]map[uuid.UUID]bool{},
-		comments:    map[uuid.UUID][]Comment{},
-		commentByID: map[uuid.UUID]Comment{},
-		friends:     map[uuid.UUID]map[uuid.UUID]bool{},
+		moments:       map[uuid.UUID]Moment{},
+		media:         map[uuid.UUID][]Media{},
+		likes:         map[uuid.UUID]map[uuid.UUID]bool{},
+		comments:      map[uuid.UUID][]Comment{},
+		commentByID:   map[uuid.UUID]Comment{},
+		friends:       map[uuid.UUID]map[uuid.UUID]bool{},
+		excludedUsers: map[uuid.UUID][]uuid.UUID{},
+		hiddenMoments: map[uuid.UUID]map[uuid.UUID]bool{},
 	}
 }
 
@@ -95,7 +108,7 @@ func (fs *fakeStore) seedMoment(id, author uuid.UUID, body, visibility string, c
 	return m
 }
 
-func (fs *fakeStore) CreateMoment(ctx context.Context, author uuid.UUID, body, visibility string, media []MediaInput) (uuid.UUID, error) {
+func (fs *fakeStore) CreateMoment(ctx context.Context, author uuid.UUID, body, visibility string, media []MediaInput, excludedUsers []uuid.UUID) (uuid.UUID, error) {
 	if fs.createErr != nil {
 		return uuid.Nil, fs.createErr
 	}
@@ -117,7 +130,61 @@ func (fs *fakeStore) CreateMoment(ctx context.Context, author uuid.UUID, body, v
 	m.Media = med
 	fs.moments[id] = m
 	fs.media[id] = med
+	if len(excludedUsers) > 0 {
+		fs.excludedUsers[id] = excludedUsers
+	}
 	return id, nil
+}
+
+func (fs *fakeStore) UpdateMoment(ctx context.Context, id, author uuid.UUID, body, visibility *string) (Moment, error) {
+	if fs.updateErr != nil {
+		return Moment{}, fs.updateErr
+	}
+	m, ok := fs.moments[id]
+	if !ok {
+		return Moment{}, ErrMomentNotFound
+	}
+	if m.Author.ID != author {
+		return Moment{}, ErrNotAuthor
+	}
+	if body != nil {
+		m.Body = *body
+	}
+	if visibility != nil {
+		m.Visibility = *visibility
+	}
+	fs.moments[id] = m
+	return m, nil
+}
+
+func (fs *fakeStore) HideMoment(ctx context.Context, viewer, momentID uuid.UUID) error {
+	if fs.hideErr != nil {
+		return fs.hideErr
+	}
+	if _, ok := fs.moments[momentID]; !ok {
+		return ErrMomentNotFound
+	}
+	if fs.hiddenMoments[viewer] == nil {
+		fs.hiddenMoments[viewer] = map[uuid.UUID]bool{}
+	}
+	fs.hiddenMoments[viewer][momentID] = true
+	return nil
+}
+
+func (fs *fakeStore) ReportMoment(ctx context.Context, reporter, momentID uuid.UUID, reason, details string) error {
+	if fs.reportErr != nil {
+		return fs.reportErr
+	}
+	if _, ok := fs.moments[momentID]; !ok {
+		return ErrMomentNotFound
+	}
+	fs.reports = append(fs.reports, reportedEntry{
+		reporter: reporter,
+		momentID: momentID,
+		reason:   reason,
+		details:  details,
+	})
+	return nil
 }
 
 func (fs *fakeStore) GetMoment(ctx context.Context, viewer, id uuid.UUID) (Moment, error) {
@@ -213,7 +280,7 @@ func (fs *fakeStore) GetComment(ctx context.Context, id uuid.UUID) (Comment, err
 	return c, nil
 }
 
-func (fs *fakeStore) AddComment(ctx context.Context, momentID, author uuid.UUID, body string) (Comment, error) {
+func (fs *fakeStore) AddComment(ctx context.Context, momentID, author uuid.UUID, body string, replyToID *uuid.UUID) (Comment, error) {
 	if fs.addCommentErr != nil {
 		return Comment{}, fs.addCommentErr
 	}
@@ -221,8 +288,14 @@ func (fs *fakeStore) AddComment(ctx context.Context, momentID, author uuid.UUID,
 		ID:        uuid.New(),
 		MomentID:  momentID,
 		Author:    Author{ID: author, DisplayName: "Commenter"},
+		ReplyToID: replyToID,
 		Body:      body,
 		CreatedAt: time.Now().UTC().Truncate(time.Millisecond),
+	}
+	if replyToID != nil {
+		if parent, ok := fs.commentByID[*replyToID]; ok {
+			c.ReplyToAuthor = &parent.Author
+		}
 	}
 	fs.commentByID[c.ID] = c
 	fs.comments[momentID] = append(fs.comments[momentID], c)
@@ -520,14 +593,14 @@ func TestAddCommentValidatesBody(t *testing.T) {
 	fs.seedMoment(id, author, "m", VisibilityFriends, time.Now())
 	svc := testService(fs, nil)
 
-	if _, err := svc.AddComment(context.Background(), author, id, "  "); err == nil {
+	if _, err := svc.AddComment(context.Background(), author, id, "  ", nil); err == nil {
 		t.Fatal("blank comment should fail")
 	}
 	long := make([]rune, maxCommentRunes+1)
 	for i := range long {
 		long[i] = 'x'
 	}
-	_, err := svc.AddComment(context.Background(), author, id, string(long))
+	_, err := svc.AddComment(context.Background(), author, id, string(long), nil)
 	var ve *ValidationError
 	if !errors.As(err, &ve) || ve.Field != "body" {
 		t.Fatalf("expected body validation error, got %v", err)
@@ -542,7 +615,7 @@ func TestAddCommentDeniedForHiddenMoment(t *testing.T) {
 	fs.seedMoment(id, author, "m", VisibilityPrivate, time.Now())
 	svc := testService(fs, nil)
 
-	if _, err := svc.AddComment(context.Background(), stranger, id, "hi"); !errors.Is(err, ErrMomentNotFound) {
+	if _, err := svc.AddComment(context.Background(), stranger, id, "hi", nil); !errors.Is(err, ErrMomentNotFound) {
 		t.Fatalf("stranger must not comment on a private moment, got %v", err)
 	}
 }
@@ -580,7 +653,7 @@ func TestDeleteCommentNotFoundWhenStoreRejects(t *testing.T) {
 
 func TestDeleteCommentSucceeds(t *testing.T) {
 	fs := newFakeStore()
-	c, err := fs.AddComment(context.Background(), uuid.New(), uuid.New(), "keep")
+	c, err := fs.AddComment(context.Background(), uuid.New(), uuid.New(), "keep", nil)
 	if err != nil {
 		t.Fatalf("seed comment: %v", err)
 	}
@@ -700,3 +773,160 @@ func TestCursorRoundTrip(t *testing.T) {
 		t.Fatalf("time mismatch: %s != %s", *gotT, ts)
 	}
 }
+
+// --- Phase 7 tests: Update, Hide, Report, Replies, Exclusions ---
+
+func TestUpdateMoment(t *testing.T) {
+	author := uuid.New()
+	other := uuid.New()
+	id := uuid.New()
+	fs := newFakeStore()
+	fs.seedMoment(id, author, "Original text", VisibilityFriends, time.Now())
+	svc := testService(fs, nil)
+
+	// Update text and visibility by author
+	newBody := "Updated text"
+	newVis := VisibilityPublic
+	updated, err := svc.Update(context.Background(), author, id, UpdateMomentInput{
+		Body:       &newBody,
+		Visibility: &newVis,
+	})
+	if err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+	if updated.Body != newBody || updated.Visibility != newVis {
+		t.Fatalf("unexpected updated values: body=%q vis=%q", updated.Body, updated.Visibility)
+	}
+
+	// Update by non-author should fail
+	_, err = svc.Update(context.Background(), other, id, UpdateMomentInput{
+		Body: &newBody,
+	})
+	if !errors.Is(err, ErrNotAuthor) {
+		t.Fatalf("expected ErrNotAuthor, got %v", err)
+	}
+}
+
+func TestUpdateMomentValidation(t *testing.T) {
+	author := uuid.New()
+	id := uuid.New()
+	fs := newFakeStore()
+	fs.seedMoment(id, author, "Original text", VisibilityFriends, time.Now())
+	svc := testService(fs, nil)
+
+	// Invalid visibility
+	badVis := "invalid_vis"
+	_, err := svc.Update(context.Background(), author, id, UpdateMomentInput{
+		Visibility: &badVis,
+	})
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Field != "visibility" {
+		t.Fatalf("expected visibility validation error, got %v", err)
+	}
+
+	// Body too long
+	long := make([]rune, maxBodyRunes+1)
+	for i := range long {
+		long[i] = 'a'
+	}
+	tooLong := string(long)
+	_, err = svc.Update(context.Background(), author, id, UpdateMomentInput{
+		Body: &tooLong,
+	})
+	if !errors.As(err, &ve) || ve.Field != "body" {
+		t.Fatalf("expected body validation error, got %v", err)
+	}
+}
+
+func TestHideMoment(t *testing.T) {
+	viewer := uuid.New()
+	id := uuid.New()
+	fs := newFakeStore()
+	fs.seedMoment(id, uuid.New(), "Post", VisibilityFriends, time.Now())
+	svc := testService(fs, nil)
+
+	if err := svc.Hide(context.Background(), viewer, id); err != nil {
+		t.Fatalf("hide failed: %v", err)
+	}
+	if !fs.hiddenMoments[viewer][id] {
+		t.Fatal("expected moment to be marked hidden for viewer")
+	}
+}
+
+func TestReportMoment(t *testing.T) {
+	reporter := uuid.New()
+	id := uuid.New()
+	fs := newFakeStore()
+	fs.seedMoment(id, uuid.New(), "Post", VisibilityFriends, time.Now())
+	svc := testService(fs, nil)
+
+	// Missing reason should fail validation
+	err := svc.Report(context.Background(), reporter, id, ReportInput{
+		Reason: "   ",
+	})
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Field != "reason" {
+		t.Fatalf("expected reason validation error, got %v", err)
+	}
+
+	// Valid report
+	err = svc.Report(context.Background(), reporter, id, ReportInput{
+		Reason:  "spam",
+		Details: "Spam advertising links",
+	})
+	if err != nil {
+		t.Fatalf("report failed: %v", err)
+	}
+	if len(fs.reports) != 1 || fs.reports[0].reason != "spam" {
+		t.Fatalf("expected report recorded, got %+v", fs.reports)
+	}
+}
+
+func TestAddCommentReply(t *testing.T) {
+	author := uuid.New()
+	id := uuid.New()
+	fs := newFakeStore()
+	fs.seedMoment(id, author, "Hello world", VisibilityFriends, time.Now())
+	svc := testService(fs, nil)
+
+	// Top level comment
+	c1, err := svc.AddComment(context.Background(), author, id, "First comment", nil)
+	if err != nil {
+		t.Fatalf("add comment: %v", err)
+	}
+	if c1.ReplyToID != nil {
+		t.Fatalf("expected nil reply_to_id, got %v", c1.ReplyToID)
+	}
+
+	// Reply to comment
+	c2, err := svc.AddComment(context.Background(), author, id, "Replying to first", &c1.ID)
+	if err != nil {
+		t.Fatalf("add reply: %v", err)
+	}
+	if c2.ReplyToID == nil || *c2.ReplyToID != c1.ID {
+		t.Fatalf("expected reply_to_id %s, got %v", c1.ID, c2.ReplyToID)
+	}
+	if c2.ReplyToAuthor == nil || c2.ReplyToAuthor.ID != author {
+		t.Fatalf("expected reply_to_author %s, got %v", author, c2.ReplyToAuthor)
+	}
+}
+
+func TestCreateMomentWithExclusions(t *testing.T) {
+	author := uuid.New()
+	excluded := uuid.New()
+	fs := newFakeStore()
+	svc := testService(fs, nil)
+
+	moment, err := svc.Create(context.Background(), Author{ID: author, DisplayName: "Alice"}, CreateMomentInput{
+		Body:            "Excluding someone",
+		Visibility:      VisibilityFriends,
+		ExcludedUserIDs: []string{excluded.String()},
+	})
+	if err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+	if len(fs.excludedUsers[moment.ID]) != 1 || fs.excludedUsers[moment.ID][0] != excluded {
+		t.Fatalf("expected exclusion for %s, got %v", excluded, fs.excludedUsers[moment.ID])
+	}
+}
+
