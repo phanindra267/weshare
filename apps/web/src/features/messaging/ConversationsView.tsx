@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/Input";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorMessage } from "@/components/ui/ErrorMessage";
 import { Skeleton } from "@/components/ui/Skeleton";
+import { UploadProgress } from "@/components/ui/UploadProgress";
 import { useToast } from "@/components/ui/Toast";
 import { ApiError } from "@/lib/api";
 import { useAuth } from "@/features/auth/AuthProvider";
@@ -73,6 +74,7 @@ export function ConversationsView() {
   const [infoOpen, setInfoOpen] = React.useState(false);
   const [members, setMembers] = React.useState<Member[] | null>(null);
   const [uploading, setUploading] = React.useState(false);
+  const [uploadProgress, setUploadProgress] = React.useState(0);
 
   // Mirrors read inside stable callbacks so subscriptions never go stale.
   const selectedIdRef = React.useRef<string | null>(null);
@@ -523,14 +525,19 @@ export function ConversationsView() {
       duration?: number,
     ) => {
       setUploading(true);
+      setUploadProgress(0);
       try {
-        const attachment = await messagingApi.uploadAttachment(file);
+        const attachment = await messagingApi.uploadAttachment(file, (percent) => {
+          setUploadProgress(percent);
+        });
         const content: MessageContent =
           mediaType === "audio"
             ? { url: attachment.url, duration }
             : mediaType === "image"
               ? { url: attachment.url }
-              : { url: attachment.url, name: attachment.name, size: attachment.size };
+              : mediaType === "video"
+                ? { url: attachment.url, content_type: attachment.content_type }
+                : { url: attachment.url, name: attachment.name, size: attachment.size };
         const clientMsgId = crypto.randomUUID();
         const message = await messagingApi.sendMessage(convId, {
           client_msg_id: clientMsgId,
@@ -547,6 +554,7 @@ export function ConversationsView() {
         });
       } finally {
         setUploading(false);
+        setUploadProgress(0);
       }
     },
     [toast, updateConversationOnMessage],
@@ -558,12 +566,25 @@ export function ConversationsView() {
       if (!convId) return;
       const type: MessageType = file.type.startsWith("image/")
         ? "image"
-        : file.type.startsWith("audio/")
-          ? "audio"
-          : "file";
+        : file.type.startsWith("video/")
+          ? "video"
+          : file.type.startsWith("audio/")
+            ? "audio"
+            : "file";
       void uploadAndSend(convId, file, type);
     },
     [uploadAndSend],
+  );
+
+  const handleAttachError = React.useCallback(
+    (message: string) => {
+      toast({
+        title: "Attachment rejected",
+        description: message,
+        variant: "error",
+      });
+    },
+    [toast],
   );
 
   const handleVoice = React.useCallback(
@@ -777,11 +798,21 @@ export function ConversationsView() {
             ) : null}
 
             <div className="border-border-subtle border-t p-3">
+              {uploading ? (
+                <div className="mb-2">
+                  <div className="mb-1 flex items-center justify-between text-xs text-ink-muted">
+                    <span>Uploading attachment…</span>
+                    <span>{uploadProgress}%</span>
+                  </div>
+                  <UploadProgress percent={uploadProgress} />
+                </div>
+              ) : null}
               <MessageComposer
                 uploading={uploading}
                 onSend={sendText}
                 onTyping={sendTyping}
                 onAttach={handleAttach}
+                onAttachError={handleAttachError}
                 onVoice={(blob, durationMs) =>
                   void handleVoice(blob, durationMs)
                 }

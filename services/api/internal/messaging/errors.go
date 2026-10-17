@@ -86,6 +86,7 @@ const (
 	MessageTypeImage  = "image"
 	MessageTypeFile   = "file"
 	MessageTypeAudio  = "audio"
+	MessageTypeVideo  = "video"
 	MessageTypeSystem = "system"
 )
 

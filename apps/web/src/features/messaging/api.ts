@@ -1,4 +1,5 @@
 import { api } from "@/lib/api";
+import { uploadWithProgress } from "@/lib/media";
 import type { Paginated } from "@/types/api";
 import type {
   Attachment,
@@ -105,8 +106,11 @@ export const messagingApi = {
 
   // --- media ----------------------------------------------------------------
 
-  /** Upload a chat attachment (image, voice note, or generic file). */
-  uploadAttachment: (file: File) => {
+  /** Upload a chat attachment (image, voice note, video, or generic file) with optional progress tracking. */
+  uploadAttachment: (file: File, onProgress?: (percent: number) => void) => {
+    if (onProgress) {
+      return uploadWithProgress<Attachment>(file, onProgress);
+    }
     const form = new FormData();
     form.append("file", file);
     return api.post<Attachment>("/api/v1/media/attachments", {

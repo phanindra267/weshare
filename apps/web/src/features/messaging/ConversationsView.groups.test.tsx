@@ -200,7 +200,10 @@ describe("ConversationsView groups & media", () => {
     await userEvent.upload(input as HTMLInputElement, file);
 
     await waitFor(() => {
-      expect(h.uploadAttachment).toHaveBeenCalledWith(file);
+      expect(h.uploadAttachment).toHaveBeenCalledWith(
+        file,
+        expect.any(Function),
+      );
     });
     await waitFor(() => {
       expect(h.sendMessage).toHaveBeenCalledWith(

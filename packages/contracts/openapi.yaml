@@ -611,6 +611,56 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
 
+  /api/v1/media/download/{id}:
+    get:
+      tags: [Media]
+      summary: Download private attachment by ID
+      description: >
+        Serves a private attachment with Content-Disposition attachment header
+        after authorizing that the caller is the uploader or a member of the conversation.
+      operationId: downloadAttachmentById
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The raw attachment bytes.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/media/attachments/{id}:
+    delete:
+      tags: [Media]
+      summary: Delete an attachment
+      description: >
+        Deletes a stored attachment from PostgreSQL and disk. Only the uploader may delete it.
+      operationId: deleteAttachment
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: Attachment deleted successfully.
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
   /api/v1/moments:
     get:
       tags: [Moments]
@@ -1054,7 +1104,7 @@ components:
           type: string
           description: Path to retrieve the bytes, e.g. `/api/v1/media/attachments/<name>`.
         content_type: { type: string }
-        kind: { type: string, enum: [image, audio, file] }
+        kind: { type: string, enum: [image, audio, video, file] }
         name: { type: string }
         size: { type: integer }
       required: [url, content_type, kind, name, size]
@@ -1069,11 +1119,11 @@ components:
         client_msg_id: { type: [string, "null"] }
         message_type:
           type: string
-          enum: [text, image, file, audio, system]
+          enum: [text, image, file, audio, video, system]
         content:
           description: >
             Body shape depends on `message_type`. `text`: `{text}` (non-empty,
-            max 4000 characters). `image`: `{url}`. `audio`: `{url, duration?}`
+            max 4000 characters). `image`: `{url}`. `video`: `{url}`. `audio`: `{url, duration?}`
             (`duration` in seconds). `file`: `{url, name?, size?}`. `system`:
             `{text}` (server-generated only).
           type: object

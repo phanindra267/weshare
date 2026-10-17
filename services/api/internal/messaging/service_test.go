@@ -529,8 +529,9 @@ func TestSendInput_Validate(t *testing.T) {
 		{"empty text", SendInput{ClientMsgID: "c", MessageType: MessageTypeText, Content: json.RawMessage(`{"text":""}`)}, "content"},
 		{"unknown key", SendInput{ClientMsgID: "c", MessageType: MessageTypeText, Content: json.RawMessage(`{"text":"hi","bogus":1}`)}, "content"},
 		{"system type", SendInput{ClientMsgID: "c", MessageType: MessageTypeSystem, Content: json.RawMessage(`{"text":"hi"}`)}, "message_type"},
-		{"bad type", SendInput{ClientMsgID: "c", MessageType: "video", Content: json.RawMessage(`{"text":"hi"}`)}, "message_type"},
+		{"bad type", SendInput{ClientMsgID: "c", MessageType: "unknown", Content: json.RawMessage(`{"text":"hi"}`)}, "message_type"},
 		{"image needs url", SendInput{ClientMsgID: "c", MessageType: MessageTypeImage, Content: json.RawMessage(`{}`)}, "content"},
+		{"video needs url", SendInput{ClientMsgID: "c", MessageType: MessageTypeVideo, Content: json.RawMessage(`{}`)}, "content"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

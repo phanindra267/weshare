@@ -12,11 +12,15 @@ export interface MessageComposerProps {
   disabled?: boolean;
   /** True while an attachment upload is in flight. */
   uploading?: boolean;
+  /** Maximum allowed file size in bytes (defaults to 50 MB). */
+  maxAttachmentBytes?: number;
   onSend: (text: string) => void;
   /** Called when the local typing state changes (true on first keystroke). */
   onTyping: (typing: boolean) => void;
   /** Hand a picked file to the caller for upload + send. */
   onAttach?: (file: File) => void;
+  /** Report an attachment error (e.g. file size exceeded). */
+  onAttachError?: (message: string) => void;
   /** Hand a recorded voice note to the caller for upload + send. */
   onVoice?: (blob: Blob, durationMs: number) => void;
 }
@@ -39,9 +43,11 @@ function canRecord(): boolean {
 export function MessageComposer({
   disabled,
   uploading,
+  maxAttachmentBytes = 50 * 1024 * 1024,
   onSend,
   onTyping,
   onAttach,
+  onAttachError,
   onVoice,
 }: MessageComposerProps) {
   const [value, setValue] = React.useState("");
@@ -110,7 +116,17 @@ export function MessageComposer({
   const handleFileChange = (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
-    if (file && onAttach) onAttach(file);
+    if (!file) return;
+
+    if (file.size > maxAttachmentBytes) {
+      if (onAttachError) {
+        const mb = Math.round(maxAttachmentBytes / (1024 * 1024));
+        onAttachError(`That file exceeds the maximum size limit of ${mb} MB.`);
+      }
+      return;
+    }
+
+    if (onAttach) onAttach(file);
   };
 
   const finalizeRecording = React.useCallback(

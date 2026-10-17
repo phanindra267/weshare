@@ -31,9 +31,6 @@ var AllowedImageExts = map[string]string{
 	"image/gif":  ".gif",
 }
 
-// AllowedAudioExts classifies sniffed audio content types. Browsers produce
-// audio/webm and audio/ogg for recorded voice notes, and Go's sniffer reports
-// those as video/webm and application/ogg respectively, so both are mapped.
 var AllowedAudioExts = map[string]string{
 	"audio/mpeg":      ".mp3",
 	"audio/mp3":       ".mp3",
@@ -43,6 +40,13 @@ var AllowedAudioExts = map[string]string{
 	"audio/wav":       ".wav",
 	"audio/x-wav":     ".wav",
 	"audio/webm":      ".webm",
+}
+
+// AllowedVideoExts classifies sniffed video content types.
+var AllowedVideoExts = map[string]string{
+	"video/mp4":       ".mp4",
+	"video/quicktime": ".mov",
+	"video/ogg":       ".ogv",
 	"video/webm":      ".webm",
 }
 
@@ -152,7 +156,17 @@ func ContentTypeForExt(ext string) string {
 	case ".wav":
 		return "audio/wav"
 	case ".webm":
-		return "audio/webm"
+		return "video/webm"
+	case ".mp4":
+		return "video/mp4"
+	case ".mov":
+		return "video/quicktime"
+	case ".ogv":
+		return "video/ogg"
+	case ".mkv":
+		return "video/x-matroska"
+	case ".avi":
+		return "video/x-msvideo"
 	case ".txt":
 		return "text/plain; charset=utf-8"
 	case ".pdf":
@@ -166,9 +180,9 @@ func ContentTypeForExt(ext string) string {
 
 // SaveAttachment persists an uploaded chat attachment under a random name and
 // returns the storage-relative path, the canonical content type, the classified
-// kind ("image", "audio", or "file"), and the stored byte size.
+// kind ("image", "audio", "video", or "file"), and the stored byte size.
 //
-// The sniffed bytes decide images and audio (so a mislabeled upload cannot
+// The sniffed bytes decide images, audio, and video (so a mislabeled upload cannot
 // smuggle a disallowed type past the client), while anything else is stored
 // verbatim as a generic file using the sanitized original extension.
 func (s *Storage) SaveAttachment(name string, r io.Reader, maxBytes int64, original string) (rel, contentType, kind string, size int64, err error) {
@@ -188,11 +202,31 @@ func (s *Storage) SaveAttachment(name string, r io.Reader, maxBytes int64, origi
 	switch {
 	case AllowedImageExts[sniffed] != "":
 		ext, kind, contentType = AllowedImageExts[sniffed], "image", sniffed
+	case sniffed == "video/webm":
+		// Browsers record audio/webm for voice notes which Go's sniffer reports as video/webm.
+		origExt := strings.ToLower(filepath.Ext(original))
+		if strings.Contains(strings.ToLower(original), "voice") || origExt == ".weba" {
+			ext, kind, contentType = ".webm", "audio", "audio/webm"
+		} else {
+			ext, kind, contentType = ".webm", "video", "video/webm"
+		}
 	case AllowedAudioExts[sniffed] != "":
 		ext, kind, contentType = AllowedAudioExts[sniffed], "audio", sniffed
+	case AllowedVideoExts[sniffed] != "":
+		ext, kind, contentType = AllowedVideoExts[sniffed], "video", sniffed
 	default:
-		ext, kind = safeExt(original), "file"
+		ext = safeExt(original)
 		contentType = ContentTypeForExt(ext)
+		switch {
+		case strings.HasPrefix(contentType, "video/"):
+			kind = "video"
+		case strings.HasPrefix(contentType, "audio/"):
+			kind = "audio"
+		case strings.HasPrefix(contentType, "image/"):
+			kind = "image"
+		default:
+			kind = "file"
+		}
 	}
 
 	rel = filepath.Join("attachments", name+ext)
@@ -219,6 +253,11 @@ func (s *Storage) SaveAttachment(name string, r io.Reader, maxBytes int64, origi
 	}
 
 	return rel, contentType, kind, size, nil
+}
+
+// DeleteFile deletes a stored attachment file by its relative path.
+func (s *Storage) DeleteFile(rel string) error {
+	return s.Remove(rel)
 }
 
 // Open validates and opens a stored object by category and name.

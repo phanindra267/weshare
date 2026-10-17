@@ -95,6 +95,9 @@ func run() error {
 	// The same hub fans out new Moments to a poster's friends.
 	feedService := feed.NewService(feed.NewStore(db), hub)
 
+	attachmentStore := media.NewAttachmentStore(db)
+	mediaHandler := media.NewHandlerWithStore(storage, attachmentStore, cfg.MaxAttachmentBytes)
+
 	router := apihttp.New(apihttp.Options{
 		Config:    cfg,
 		Logger:    logger,
@@ -102,7 +105,7 @@ func run() error {
 		Health:    health.NewHandler(db, cfg),
 		Auth:      auth.NewHandler(authService),
 		Users:     users.NewHandler(users.NewStore(db), storage, cfg),
-		Media:     media.NewHandler(storage, cfg.MaxAttachmentBytes),
+		Media:     mediaHandler,
 		Contacts:  contacts.NewHandler(contacts.NewService(contactsStore), cfg),
 		Messaging: messaging.NewHandler(messagingService, cfg),
 		Realtime:  realtime.NewHandler(messagingService, hub, contactsStore, cfg, logger),
@@ -118,6 +121,33 @@ func run() error {
 		IdleTimeout:       cfg.IdleTimeout,
 	}
 
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// Background sweeper for abandoned / orphaned pending uploads (older than 24 hours).
+	go func() {
+		ticker := time.NewTicker(time.Hour)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				purgeCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+				paths, err := attachmentStore.PurgeOrphaned(purgeCtx, 24*time.Hour)
+				cancel()
+				if err != nil {
+					logger.Warn("purge orphaned attachments failed", "error", err.Error())
+				} else if len(paths) > 0 {
+					for _, p := range paths {
+						_ = storage.Remove(p)
+					}
+					logger.Info("purged orphaned attachments", "count", len(paths))
+				}
+			}
+		}
+	}()
+
 	serverErr := make(chan error, 1)
 	go func() {
 		logger.Info("http server listening", "addr", cfg.HTTPAddr)
@@ -125,9 +155,6 @@ func run() error {
 			serverErr <- err
 		}
 	}()
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 
 	select {
 	case err := <-serverErr:

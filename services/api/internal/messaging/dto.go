@@ -232,6 +232,10 @@ type audioContent struct {
 	Duration int    `json:"duration,omitempty"`
 }
 
+type videoContent struct {
+	URL string `json:"url"`
+}
+
 // fileContent carries a media reference plus the original file's display name
 // and size, so the recipient can render a useful attachment card.
 type fileContent struct {
@@ -331,6 +335,18 @@ func validateContent(messageType string, content json.RawMessage) (json.RawMessa
 		if body.Size < 0 {
 			body.Size = 0
 		}
+		return mustMarshal(body), nil
+
+	case MessageTypeVideo:
+		var body videoContent
+		if !decode(&body) {
+			return nil, map[string]string{"content": "Video messages require a url field."}
+		}
+		url, ok := validateMediaURL(body.URL)
+		if !ok {
+			return nil, map[string]string{"content": "A valid video url is required."}
+		}
+		body.URL = url
 		return mustMarshal(body), nil
 
 	case MessageTypeSystem:

@@ -30,6 +30,8 @@ func TestRegisterRoutes_MountsAttachmentRoutes(t *testing.T) {
 		{http.MethodPost, "/api/v1/media/attachments"},
 		{http.MethodGet, "/api/v1/media/attachments/abc.png"},
 		{http.MethodGet, "/api/v1/media/avatars/abc.png"},
+		{http.MethodGet, "/api/v1/media/download/550e8400-e29b-41d4-a716-446655440000"},
+		{http.MethodDelete, "/api/v1/media/attachments/550e8400-e29b-41d4-a716-446655440000"},
 	}
 
 	for _, tc := range cases {

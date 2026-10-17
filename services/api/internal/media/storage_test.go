@@ -207,11 +207,52 @@ func TestSaveAvatarAtLimitIsAccepted(t *testing.T) {
 	}
 }
 
+func mp4Bytes(n int) []byte {
+	sig := []byte{0x00, 0x00, 0x00, 0x18, 'f', 't', 'y', 'p', 'm', 'p', '4', '2'}
+	buf := make([]byte, n)
+	copy(buf, sig)
+	return buf
+}
+
+func TestSaveAttachmentVideo(t *testing.T) {
+	s := newTestStorage(t)
+	rel, contentType, kind, size, err := s.SaveAttachment("vid1", bytes.NewReader(mp4Bytes(2048)), 1<<20, "video.mp4")
+	if err != nil {
+		t.Fatalf("SaveAttachment: %v", err)
+	}
+	if kind != "video" || contentType != "video/mp4" {
+		t.Fatalf("kind=%q contentType=%q, want video and video/mp4", kind, contentType)
+	}
+	if rel != filepath.Join("attachments", "vid1.mp4") || size != 2048 {
+		t.Fatalf("rel=%q size=%d", rel, size)
+	}
+	if _, err := os.Stat(filepath.Join(s.Root(), rel)); err != nil {
+		t.Fatalf("video file not written: %v", err)
+	}
+}
+
+func TestDeleteFile(t *testing.T) {
+	s := newTestStorage(t)
+	rel, _, _, _, err := s.SaveAttachment("del1", bytes.NewReader([]byte("temp")), 1<<20, "temp.txt")
+	if err != nil {
+		t.Fatalf("SaveAttachment: %v", err)
+	}
+	if err := s.DeleteFile(rel); err != nil {
+		t.Fatalf("DeleteFile: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(s.Root(), rel)); !os.IsNotExist(err) {
+		t.Fatalf("expected file to be deleted")
+	}
+}
+
 func TestContentTypeForExt(t *testing.T) {
 	cases := map[string]string{
 		".png":  "image/png",
 		".mp3":  "audio/mpeg",
 		".ogg":  "audio/ogg",
+		".mp4":  "video/mp4",
+		".mov":  "video/quicktime",
+		".webm": "video/webm",
 		".weba": "application/octet-stream",
 		".unk":  "application/octet-stream",
 	}

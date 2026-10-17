@@ -39,17 +39,45 @@ function StatusTicks({ status }: { status: ThreadMessage["status"] }) {
   );
 }
 
+function ImageBubble({ src }: { src: string }) {
+  const [loaded, setLoaded] = React.useState(false);
+  return (
+    <a href={src} target="_blank" rel="noreferrer" className="block overflow-hidden rounded-lg">
+      {!loaded && <div className="h-36 w-56 animate-pulse rounded-lg bg-surface-muted" />}
+      <img
+        src={src}
+        alt="Shared image"
+        className={cn("max-h-80 max-w-full rounded-lg object-contain", !loaded && "hidden")}
+        onLoad={() => setLoaded(true)}
+        onError={() => setLoaded(true)}
+      />
+    </a>
+  );
+}
+
 /** Renders a message body for its type. Media urls are resolved to absolute. */
 function MessageBody({ message }: { message: ThreadMessage }) {
   const src = mediaUrl(message.content.url);
   switch (message.message_type) {
     case "image":
+      return src ? <ImageBubble src={src} /> : <p>Photo</p>;
+    case "video":
       return src ? (
-        <a href={src} target="_blank" rel="noreferrer">
-          <img src={src} alt="Shared image" className="max-w-full rounded-lg" />
-        </a>
+        <div className="flex flex-col gap-1">
+          <video
+            controls
+            preload="metadata"
+            className="max-h-80 max-w-full rounded-lg"
+            aria-label="Shared video"
+          >
+            <source src={src} type={message.content.content_type ?? "video/mp4"} />
+            <a href={src} download className="text-xs underline">
+              Download video
+            </a>
+          </video>
+        </div>
       ) : (
-        <p>Photo</p>
+        <p>Video</p>
       );
     case "audio":
       return src ? (

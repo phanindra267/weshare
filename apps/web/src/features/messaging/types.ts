@@ -17,7 +17,7 @@ export interface PeerBrief {
   last_seen_at: string | null;
 }
 
-export type MessageType = "text" | "image" | "file" | "audio" | "system";
+export type MessageType = "text" | "image" | "file" | "audio" | "video" | "system";
 
 /**
  * Delivery status as seen by the viewer. The sender's own messages move
@@ -29,6 +29,7 @@ export type MessageStatus = "sent" | "delivered" | "read" | "received";
 export interface MessageContent {
   text?: string;
   url?: string;
+  content_type?: string;
   /** Voice-note length in seconds (audio messages). */
   duration?: number;
   /** Original display name of an uploaded file. */
@@ -97,9 +98,10 @@ export interface Member {
 
 /** Result of uploading a file to the media store. */
 export interface Attachment {
+  id?: string;
   url: string;
   content_type: string;
-  kind: "image" | "audio" | "file";
+  kind: "image" | "audio" | "video" | "file";
   name: string;
   size: number;
 }

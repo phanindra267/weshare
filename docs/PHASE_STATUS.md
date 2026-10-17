@@ -1,7 +1,7 @@
 # Phase Status
 
 **Project:** WeShare
-**Phase:** 5 — Moments, Social, Discover
+**Phase:** 6 — Media, Attachments, and Voice Messages
 **Status:** Verified
 **Last updated:** 2026-10-17
 
@@ -15,8 +15,32 @@
 | 3 | One-to-One Real-Time Messaging | Verified |
 | 4 | Groups, Media, Voice | Verified |
 | 5 | Moments, Social, Discover | Verified |
+| 6 | Media, Attachments, and Voice Messages | Verified |
 
 Roadmap reference: `docs/IMPLEMENTATION_AUDIT.md` ("Missing / planned by phase").
+
+---
+
+## Phase 6 — Media, Attachments, and Voice Messages
+
+### Acceptance criteria
+
+| Item | Status | Notes |
+|---|---|---|
+| Upload and share images | Completed | Supported via `POST /api/v1/media/attachments`; sniffed and validated |
+| Upload and share videos | Completed | Full `video/mp4`, `video/webm`, `video/quicktime` classification, preview with `<video controls>`, and download |
+| Upload and download ordinary files | Completed | Stored safely with sanitized extensions; served with Content-Disposition headers |
+| Record and play voice messages | Completed | In-browser MediaRecorder recording + playback via HTML5 `<audio controls>` |
+| Display audio controls and media previews | Completed | Dedicated video player, audio player with duration, image loading skeletons |
+| Show upload progress and errors | Completed | Real-time `UploadProgress` progress bar via XHR progress events; toast notifications on failure |
+| Validate file size, file type, and content | Completed | Client-side 50MB check + server-side bounded MaxBytesReader and content sniffing |
+| Store media metadata in PostgreSQL | Completed | Migration `000010_attachments` creates `message_attachments` with ownership & conversation linkage |
+| Store media bytes outside PostgreSQL | Completed | Rooted filesystem storage with subdirectories for `attachments` and `avatars` |
+| Implement authorization for private attachments | Completed | `CanAccess` verifies membership in conversation or uploader identity; `403` on unauthorized access |
+| Prevent path traversal and arbitrary file access | Completed | Regexp validation, path cleaning, and prefix checking prevent escaping storage root |
+| Add attachment ownership and message associations | Completed | Foreign keys to `users(id)`, `messages(id)`, and `conversations(id)`; uploader-only delete |
+| Handle abandoned uploads and temporary files | Completed | Background goroutine sweeper periodically purges orphaned pending attachments older than 24h |
+| Preserve uploaded media across restarts | Completed | Persistent disk storage decoupled from application process lifecycle |
 
 ---
 
