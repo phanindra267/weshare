@@ -5,6 +5,8 @@ import { AuthProvider } from "@/features/auth/AuthProvider";
 import { AppHeader } from "@/components/layout/AppHeader";
 import { PresenceHeartbeat } from "@/features/presence/PresenceHeartbeat";
 import { RealtimeProvider } from "@/features/messaging/RealtimeProvider";
+import { CallProvider } from "@/features/calls/CallProvider";
+import { CallOverlay } from "@/features/calls/CallOverlay";
 
 export const metadata: Metadata = {
   title: {
@@ -46,9 +48,12 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
         <ToastProvider>
           <AuthProvider>
             <RealtimeProvider>
-              <AppHeader />
-              <PresenceHeartbeat />
-              {children}
+              <CallProvider>
+                <AppHeader />
+                <PresenceHeartbeat />
+                <CallOverlay />
+                {children}
+              </CallProvider>
             </RealtimeProvider>
           </AuthProvider>
         </ToastProvider>

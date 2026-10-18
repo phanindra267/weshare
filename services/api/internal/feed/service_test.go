@@ -929,4 +929,3 @@ func TestCreateMomentWithExclusions(t *testing.T) {
 		t.Fatalf("expected exclusion for %s, got %v", excluded, fs.excludedUsers[moment.ID])
 	}
 }
-

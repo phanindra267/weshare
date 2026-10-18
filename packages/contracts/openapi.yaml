@@ -28,6 +28,12 @@ tags:
       Short social posts (moments) with media, likes, and comments (Phase 5).
       Moments support visibility levels (friends, public, private) and keyset
       pagination.
+  - name: Calls
+    description: >
+      Call history and the WebRTC bootstrap configuration (Phase 9). Media
+      flows peer-to-peer and never touches this API; live call control
+      (invite, accept, SDP/ICE exchange) rides the realtime socket and is
+      documented in `packages/contracts/websocket-events.md`.
 
 paths:
   /healthz:
@@ -1031,6 +1037,64 @@ paths:
         "404":
           $ref: "#/components/responses/Error"
 
+  /api/v1/calls:
+    get:
+      tags: [Calls]
+      summary: List recent calls
+      description: >
+        Returns the caller's call history, newest first, covering direct and
+        group calls. Each record carries the viewer's perspective (`direction`,
+        `outcome`) and every participant's state, so the client can render a
+        missed or declined call without extra lookups. There is no cursor:
+        this returns the most recent page.
+      operationId: listCalls
+      parameters:
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+      responses:
+        "200":
+          description: A page of calls.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/CallPage"
+        "401":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/calls/ice:
+    get:
+      tags: [Calls]
+      summary: Fetch the WebRTC bootstrap configuration
+      description: >
+        Returns the STUN/TURN servers a client should use when building peer
+        connections, plus the participant ceiling for a single call. The list
+        is empty when the server runs without `ICE_SERVERS`, in which case
+        peers rely on host candidates, which is sufficient on localhost.
+      operationId: getCallIceConfig
+      responses:
+        "200":
+          description: ICE configuration.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/IceConfig"
+        "401":
+          $ref: "#/components/responses/Error"
+
 components:
   parameters:
     ConversationId:
@@ -1451,3 +1515,100 @@ components:
           type: string
           enum: [admin, member]
       required: [role]
+
+    ICEServer:
+      description: >
+        One STUN/TURN server, mirroring the browser `RTCIceServer` shape.
+      type: object
+      properties:
+        urls:
+          type: array
+          items: { type: string }
+          examples: [["stun:stun.example.org:3478"]]
+        username:
+          type: string
+          description: Only set for TURN servers that require credentials.
+        credential:
+          type: string
+      required: [urls]
+
+    IceConfig:
+      description: WebRTC bootstrap configuration for a calling client.
+      type: object
+      properties:
+        ice_servers:
+          type: array
+          items: { $ref: "#/components/schemas/ICEServer" }
+        max_participants:
+          type: integer
+          minimum: 2
+          description: >
+            Ceiling on participants in one call. Group calls are a full P2P
+            mesh, so this bounds the fan-out each client must carry.
+      required: [ice_servers, max_participants]
+
+    CallParticipant:
+      description: One user's membership in a call.
+      type: object
+      properties:
+        user_id: { type: string, format: uuid }
+        username: { type: [string, "null"] }
+        display_name: { type: string }
+        avatar_url: { type: [string, "null"] }
+        role:
+          type: string
+          enum: [caller, callee]
+        state:
+          type: string
+          description: >
+            `invited` means rung but not yet answered; `missed` marks a callee
+            of a call that ended before they answered.
+          enum: [invited, joined, rejected, left, missed]
+      required: [user_id, display_name, role, state]
+
+    Call:
+      description: A call-history record as seen by the requesting user.
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+          description: The client-generated call id, reused across signalling.
+        kind: { type: string, enum: [audio, video] }
+        group: { type: boolean }
+        status: { type: string, enum: [ringing, active, ended, rejected, missed, failed, canceled] }
+        direction:
+          type: string
+          enum: [outgoing, incoming]
+          description: Whether the requesting user placed the call.
+        outcome:
+          type: string
+          description: >
+            Status collapsed to one log-friendly label from the viewer's side.
+            `declined` is a rejection seen by the caller; `rejected` is one
+            they performed themselves.
+          enum: [active, completed, rejected, declined, missed, cancelled, failed, unknown]
+        started_at: { type: [string, "null"], format: date-time }
+        ended_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+        duration_seconds:
+          type: integer
+          minimum: 0
+          description: >
+            Seconds from `started_at` to `ended_at`, or to now while the call
+            is still running. Zero when the call never started.
+        participants:
+          type: array
+          items: { $ref: "#/components/schemas/CallParticipant" }
+      required:
+        [id, kind, group, status, direction, outcome, created_at, duration_seconds, participants]
+
+    CallPage:
+      description: A page of call-history records, newest first.
+      type: object
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Call" }
+        next_cursor: { type: [string, "null"] }
+      required: [items, next_cursor]

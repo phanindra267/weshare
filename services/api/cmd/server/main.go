@@ -14,6 +14,7 @@ import (
 	"github.com/joho/godotenv"
 
 	"github.com/phanindra267/weshare/services/api/internal/auth"
+	"github.com/phanindra267/weshare/services/api/internal/calls"
 	"github.com/phanindra267/weshare/services/api/internal/config"
 	"github.com/phanindra267/weshare/services/api/internal/contacts"
 	"github.com/phanindra267/weshare/services/api/internal/database"
@@ -94,6 +95,8 @@ func run() error {
 	messagingService := messaging.NewService(messaging.NewStore(db), hub)
 	// The same hub fans out new Moments to a poster's friends.
 	feedService := feed.NewService(feed.NewStore(db), hub)
+	// ...and relays WebRTC call signalling between a call's participants.
+	callsService := calls.NewService(calls.NewStore(db), hub, cfg.CallMaxParticipants)
 
 	attachmentStore := media.NewAttachmentStore(db)
 	mediaHandler := media.NewHandlerWithStore(storage, attachmentStore, cfg.MaxAttachmentBytes)
@@ -108,8 +111,9 @@ func run() error {
 		Media:     mediaHandler,
 		Contacts:  contacts.NewHandler(contacts.NewService(contactsStore), cfg),
 		Messaging: messaging.NewHandler(messagingService, cfg),
-		Realtime:  realtime.NewHandler(messagingService, hub, contactsStore, cfg, logger),
+		Realtime:  realtime.NewHandler(messagingService, callsService, hub, contactsStore, cfg, logger),
 		Feed:      feed.NewHandler(feedService, cfg),
+		Calls:     calls.NewHandler(callsService, cfg),
 	})
 
 	srv := &http.Server{

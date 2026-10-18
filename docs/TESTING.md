@@ -67,9 +67,29 @@ Suites:
 - `e2e/moments.spec.ts` — two users become contacts, one shares a friends-only
   moment, the other sees it, likes it, and comments; the comment persists for the
   author after reload.
+- `e2e/calls.spec.ts` — two users become contacts and place a real audio/video
+  call: the callee answers, both sides reach `active` (which requires a peer
+  connection in state `connected`), remote video is decoding frames, ending the
+  call tears both sides down and persists a history row, and a rejected call
+  leaves nothing behind.
 
 Playwright writes failure artifacts to `apps/web/test-results/` (git-ignored);
 open the trace with `npx playwright show-trace <path>`.
+
+### Notes on the calling suite
+
+`playwright.config.ts` launches Chromium with
+`--use-fake-device-for-media-stream`, `--use-fake-ui-for-media-stream`, and
+`--autoplay-policy=no-user-gesture-required`, so calls run without a camera or
+microphone and without a permission prompt. The suite asserts that a peer
+connection reaches `connected` and that remote video reports a non-zero
+`videoWidth`; it does not assert specific pixels or audio, which fake devices do
+not make meaningful.
+
+Media never passes through the server: the API only relays SDP and ICE
+candidates over `GET /api/v1/realtime`. Because `ICE_SERVERS` is empty by
+default, calls rely on host candidates, which is exactly what works between two
+browser contexts on one machine.
 
 ## Notes
 

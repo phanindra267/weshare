@@ -10,6 +10,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 
+	"github.com/phanindra267/weshare/services/api/internal/calls"
 	"github.com/phanindra267/weshare/services/api/internal/messaging"
 )
 
@@ -28,6 +29,7 @@ type conn struct {
 	hub    *Hub
 	ws     *websocket.Conn
 	svc    *messaging.Service
+	calls  *calls.Service
 	userID uuid.UUID
 	logger *slog.Logger
 
@@ -36,11 +38,12 @@ type conn struct {
 	closeOnce sync.Once
 }
 
-func newConn(hub *Hub, ws *websocket.Conn, svc *messaging.Service, userID uuid.UUID, logger *slog.Logger) *conn {
+func newConn(hub *Hub, ws *websocket.Conn, svc *messaging.Service, callsSvc *calls.Service, userID uuid.UUID, logger *slog.Logger) *conn {
 	return &conn{
 		hub:    hub,
 		ws:     ws,
 		svc:    svc,
+		calls:  callsSvc,
 		userID: userID,
 		logger: logger,
 		send:   make(chan []byte, sendBuffer),
@@ -138,6 +141,14 @@ type clientMessage struct {
 	Typing         *bool           `json:"typing"`
 	SequenceNo     *int64          `json:"sequence_no"`
 	After          *int64          `json:"after"`
+
+	// Calling (Phase 9).
+	CallID    string          `json:"call_id"`
+	CalleeIDs []string        `json:"callee_ids"`
+	Kind      string          `json:"kind"`
+	TargetID  string          `json:"target_id"`
+	SDP       json.RawMessage `json:"sdp"`
+	Candidate json.RawMessage `json:"candidate"`
 }
 
 // handle dispatches one client frame. Errors are reported per-request without
@@ -162,8 +173,32 @@ func (c *conn) handle(data []byte) {
 		c.handleRead(msg)
 	case messaging.ClientSync:
 		c.handleSync(msg)
+	case calls.ClientInvite, calls.ClientAccept, calls.ClientReject,
+		calls.ClientEnd, calls.ClientSDP, calls.ClientCandidate:
+		c.handleCall(msg)
 	default:
 		c.sendError(msg.RequestID, "UNKNOWN_EVENT", "Unsupported event type.")
+	}
+}
+
+// handleCall dispatches a calling frame to the calls service. The service fans
+// the resulting events out through the hub, so nothing is returned here.
+func (c *conn) handleCall(msg clientMessage) {
+	if c.calls == nil {
+		c.sendError(msg.RequestID, "UNKNOWN_EVENT", "Calling is not available.")
+		return
+	}
+	err := c.calls.Handle(context.Background(), c.userID, calls.ClientFrame{
+		Type:      msg.Type,
+		CallID:    msg.CallID,
+		CalleeIDs: msg.CalleeIDs,
+		Kind:      msg.Kind,
+		TargetID:  msg.TargetID,
+		SDP:       msg.SDP,
+		Candidate: msg.Candidate,
+	})
+	if err != nil {
+		c.sendCallError(msg.RequestID, err)
 	}
 }
 
@@ -304,5 +339,11 @@ func (c *conn) sendError(requestID, code, message string) {
 // code mirrors the REST layer so clients can handle both identically.
 func (c *conn) sendMessagingError(requestID string, err error) {
 	code, message := classifyError(err)
+	c.sendError(requestID, code, message)
+}
+
+// sendCallError maps a calls domain error onto a socket error frame.
+func (c *conn) sendCallError(requestID string, err error) {
+	code, message := classifyCallError(err)
 	c.sendError(requestID, code, message)
 }

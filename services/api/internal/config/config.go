@@ -82,6 +82,12 @@ type Config struct {
 	MaxAvatarBytes     int64
 	MaxAttachmentBytes int64
 
+	// WebRTC calling. ICEServers is empty by default (host candidates only,
+	// which is sufficient on localhost); set ICE_SERVERS to a JSON array to
+	// add STUN/TURN. CallMaxParticipants bounds a single call's mesh size.
+	ICEServers          []ICEServer
+	CallMaxParticipants int
+
 	LogLevel  string
 	LogFormat string
 
@@ -149,6 +155,8 @@ func Load(version string) (*Config, error) {
 		MaxAvatarBytes:     int64(getInt("MAX_AVATAR_BYTES", 2*1024*1024)),
 		MaxAttachmentBytes: int64(getInt("MAX_ATTACHMENT_BYTES", 10*1024*1024)),
 
+		CallMaxParticipants: getInt("CALL_MAX_PARTICIPANTS", 4),
+
 		LogLevel:  strings.ToLower(getenv("LOG_LEVEL", "info")),
 		LogFormat: strings.ToLower(getenv("LOG_FORMAT", "json")),
 
@@ -158,6 +166,12 @@ func Load(version string) (*Config, error) {
 	// Cookies are Secure by default in production; require an explicit
 	// opt-out (COOKIE_SECURE=false) rather than an opt-in elsewhere.
 	cfg.CookieSecure = getBool("COOKIE_SECURE", cfg.IsProduction())
+
+	iceServers, err := parseICEServers(os.Getenv("ICE_SERVERS"))
+	if err != nil {
+		return nil, fmt.Errorf("invalid ICE_SERVERS: %w", err)
+	}
+	cfg.ICEServers = iceServers
 
 	if err := cfg.validate(); err != nil {
 		return nil, err
@@ -257,6 +271,24 @@ func (c *Config) validate() error {
 	}
 	if c.MaxAttachmentBytes <= 0 {
 		problems = append(problems, "MAX_ATTACHMENT_BYTES must be positive")
+	}
+
+	if c.CallMaxParticipants < 2 {
+		problems = append(problems, "CALL_MAX_PARTICIPANTS must be at least 2")
+	}
+	for i, server := range c.ICEServers {
+		if len(server.URLs) == 0 {
+			problems = append(problems,
+				fmt.Sprintf("ICE_SERVERS[%d] must have at least one url", i))
+		}
+		for _, u := range server.URLs {
+			if !strings.HasPrefix(u, "stun:") &&
+				!strings.HasPrefix(u, "turn:") &&
+				!strings.HasPrefix(u, "turns:") {
+				problems = append(problems,
+					fmt.Sprintf("ICE_SERVERS[%d] url %q must use stun:, turn:, or turns:", i, u))
+			}
+		}
 	}
 
 	if c.IsProduction() && len(c.CORSAllowedOrigins) == 0 {

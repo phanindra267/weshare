@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/phanindra267/weshare/services/api/internal/auth"
+	"github.com/phanindra267/weshare/services/api/internal/calls"
 	"github.com/phanindra267/weshare/services/api/internal/config"
 	"github.com/phanindra267/weshare/services/api/internal/contacts"
 	"github.com/phanindra267/weshare/services/api/internal/database"
@@ -36,6 +37,7 @@ type Options struct {
 	Messaging *messaging.Handler
 	Realtime  *realtime.Handler
 	Feed      *feed.Handler
+	Calls     *calls.Handler
 }
 
 // New builds the configured Gin engine.
@@ -117,5 +119,8 @@ func registerAPIRoutes(api *gin.RouterGroup, opts Options) {
 	}
 	if opts.Feed != nil && opts.Auth != nil {
 		opts.Feed.RegisterRoutes(api, opts.Auth.RequireAuth())
+	}
+	if opts.Calls != nil && opts.Auth != nil {
+		opts.Calls.RegisterRoutes(api, opts.Auth.RequireAuth())
 	}
 }

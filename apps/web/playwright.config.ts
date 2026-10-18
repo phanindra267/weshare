@@ -16,6 +16,16 @@ export default defineConfig({
   use: {
     baseURL: process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000",
     trace: "on-first-retry",
+    // Calls (Phase 9) need a camera and microphone. Feed Chromium synthetic
+    // devices so WebRTC negotiates real tracks without any hardware, and
+    // auto-grant the permission prompt it would otherwise raise.
+    launchOptions: {
+      args: [
+        "--use-fake-device-for-media-stream",
+        "--use-fake-ui-for-media-stream",
+        "--autoplay-policy=no-user-gesture-required",
+      ],
+    },
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
   webServer: {

@@ -5,6 +5,17 @@
  */
 
 import type { MomentCreatedEvent } from "@/features/moments/types";
+import type {
+  CallAcceptedEvent,
+  CallBusyEvent,
+  CallCandidateEvent,
+  CallEndedEvent,
+  CallIncomingEvent,
+  CallParticipantsEvent,
+  CallRejectedEvent,
+  CallSDPEvent,
+  CallUnavailableEvent,
+} from "@/features/calls/types";
 
 /** Public peer profile embedded in conversation payloads. */
 export interface PeerBrief {
@@ -226,6 +237,15 @@ export type ServerEvent =
   | MemberChangedEvent
   | MomentCreatedEvent
   | RealtimeErrorEvent
-  | PongEvent;
+  | PongEvent
+  | CallIncomingEvent
+  | CallAcceptedEvent
+  | CallRejectedEvent
+  | CallBusyEvent
+  | CallUnavailableEvent
+  | CallSDPEvent
+  | CallCandidateEvent
+  | CallEndedEvent
+  | CallParticipantsEvent;
 
 export type ConnectionStatus = "connecting" | "open" | "closed";

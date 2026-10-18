@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/phanindra267/weshare/services/api/internal/auth"
+	"github.com/phanindra267/weshare/services/api/internal/calls"
 	"github.com/phanindra267/weshare/services/api/internal/config"
 	"github.com/phanindra267/weshare/services/api/internal/httpx"
 	"github.com/phanindra267/weshare/services/api/internal/messaging"
@@ -27,6 +28,7 @@ type Contacts interface {
 // the realtime protocol.
 type Handler struct {
 	svc      *messaging.Service
+	calls    *calls.Service
 	hub      *Hub
 	contacts Contacts
 	cfg      *config.Config
@@ -35,10 +37,12 @@ type Handler struct {
 }
 
 // NewHandler builds a realtime Handler. contacts may be nil, in which case
-// presence updates are not fanned out to friends.
-func NewHandler(svc *messaging.Service, hub *Hub, contacts Contacts, cfg *config.Config, logger *slog.Logger) *Handler {
+// presence updates are not fanned out to friends. calls may be nil, in which
+// case call frames are rejected.
+func NewHandler(svc *messaging.Service, callsSvc *calls.Service, hub *Hub, contacts Contacts, cfg *config.Config, logger *slog.Logger) *Handler {
 	h := &Handler{
 		svc:      svc,
+		calls:    callsSvc,
 		hub:      hub,
 		contacts: contacts,
 		cfg:      cfg,
@@ -95,7 +99,7 @@ func (h *Handler) Serve(c *gin.Context) {
 		return
 	}
 
-	conn := newConn(h.hub, ws, h.svc, user.ID, h.logger)
+	conn := newConn(h.hub, ws, h.svc, h.calls, user.ID, h.logger)
 	h.hub.add(conn)
 	go conn.writePump()
 
@@ -118,6 +122,12 @@ func (h *Handler) Serve(c *gin.Context) {
 	// Only announce offline once the user's last connection is gone.
 	if !h.hub.Online(user.ID) {
 		h.broadcastPresence(user.ID, false)
+		// A user whose last socket just closed cannot stay on a call.
+		if h.calls != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			h.calls.HandleDisconnect(ctx, user.ID)
+		}
 	}
 }
 

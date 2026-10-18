@@ -4,8 +4,9 @@ This document is the source of truth for the realtime protocol. It defines the
 envelope, conventions, and the event catalogue. The catalogue grows as phases
 are implemented; events listed as **Implemented** are wired and tested.
 
-The realtime layer was introduced in **Phase 3** (one-to-one messaging) and
-extended in **Phase 4** (group lifecycle events and richer message content).
+The realtime layer was introduced in **Phase 3** (one-to-one messaging),
+extended in **Phase 4** (group lifecycle events and richer message content),
+and carries WebRTC call signalling since **Phase 9**.
 
 ## Connection
 
@@ -123,11 +124,13 @@ Unknown fields are ignored so the protocol can grow without breaking clients.
 | `error` | `code`, `message`, `request_id` | Implemented | 3 |
 | `conversation.updated` | `conversation_id`, `title`, `avatar_url`, `member_count` | Implemented | 4 |
 | `member.changed` | `conversation_id`, `user_id`, `role`, `action` (`added`\|`removed`\|`left`\|`role`) | Implemented | 4 |
-| `moment.created` | `moment` | Implemented | 5 |
-| `message.updated` | `message` | Planned | 3 |
-| `message.deleted` | `message_id` | Planned | 3 |
-| `call.invite` / `call.answer` / `call.candidate` | — | Planned | 6 |
-| `notification.created` | — | Planned | 7 |
+| `moment.created` | `moment` | Implemented | 7 |
+| `message.updated` | `message` | Planned | 4 |
+| `message.deleted` | `message_id` | Planned | 4 |
+| `notification.created` | — | Planned | — |
+
+Calling (Phase 9) has its own catalogue below, since it carries a second
+set of client and server events.
 
 Status values: **Planned** (designed, not implemented), **In progress**, and
 **Implemented** (wired and tested).
@@ -144,7 +147,7 @@ user for `member.changed`), and never for direct conversations.
 System messages (for example, "Alice added Bob.") arrive as ordinary
 `message.created` events with `message_type: "system"`.
 
-### Moments (Phase 5)
+### Moments (Phase 7)
 
 `moment.created` is published to the author's accepted contacts when a moment
 is created with `friends` visibility, and to nobody else for `private`. Public
@@ -155,8 +158,81 @@ contract (author, body, media, like/comment counts, `liked_by_me`). Likes and
 comments do not currently emit realtime events; clients refresh counts on
 demand.
 
+### Calling events (Phase 9)
+
+WebRTC signalling rides this same socket. Media itself never touches the
+server: peers exchange SDP and ICE candidates here and then stream directly to
+each other. Every calling frame carries a client-generated `call_id` (a UUID),
+so the caller never waits for a round trip before rendering its UI.
+
+#### Client → Server
+
+| Type | Fields |
+| --- | --- |
+| `call.invite` | `call_id`, `callee_ids`, `kind` (`audio`\|`video`) |
+| `call.accept` | `call_id` |
+| `call.reject` | `call_id` |
+| `call.end` | `call_id` |
+| `call.sdp` | `call_id`, `target_id`, `sdp` |
+| `call.candidate` | `call_id`, `target_id`, `candidate` |
+
+#### Server → Client
+
+| Type | Fields |
+| --- | --- |
+| `call.incoming` | `call_id`, `from` (profile brief), `kind`, `group`, `participants` |
+| `call.accepted` | `call_id`, `user_id` |
+| `call.rejected` | `call_id`, `user_id` |
+| `call.busy` | `call_id`, `user_id` |
+| `call.unavailable` | `call_id`, `user_id` |
+| `call.sdp` | `call_id`, `from_user_id`, `sdp` |
+| `call.candidate` | `call_id`, `from_user_id`, `candidate` |
+| `call.ended` | `call_id`, `reason`, `user_id?` |
+| `call.participants` | `call_id`, `participants` (profile briefs) |
+
+#### Rules
+
+- **Contacts only.** You may only call users you are connected with; anyone else
+  gets `FORBIDDEN`.
+- **One call per user.** A second `call.invite` while already in a call fails
+  with `FORBIDDEN` on the caller's side, and a callee who is already busy makes
+  the caller receive `call.busy`. If *no* callee can be reached — every one of
+  them busy — no call is created and the caller also receives `call.ended` with
+  `reason: "failed"`, so an unanswerable call never rings forever.
+- **Offline callee.** If no callee has a live socket the call fails
+  immediately: the caller receives `call.unavailable` followed by `call.ended`
+  with `reason: "failed"`, and the row is stored as `failed`.
+- **Glare-free offers.** A participant who is already joined creates the SDP
+  offer towards a newly joined one; a joiner only ever answers. For a 1:1 call
+  this means the caller (joined at invite time) sends the offer once the callee
+  accepts, so neither side has to re-negotiate on collision.
+- **End semantics.** A direct call ends as a whole — everyone gets `call.ended`
+  with `reason: "hangup"` (it was active), `"cancelled"` (the caller hung up
+  while it was still ringing), or `"rejected"`, and the row is closed out. In a
+  group call, ending is per-participant: only `reason: "left"` is sent, and the
+  call closes once nobody remains.
+- **Disconnect cleanup.** When a user's last socket closes they are dropped from
+  any active call, so an abandoned tab cannot leave a call ringing forever.
+- **History and bootstrap.** Call history is served by `GET /api/v1/calls`, and
+  the STUN/TURN servers plus the participant ceiling by `GET /api/v1/calls/ice`.
+
+#### Scalability limit (P2P vs SFU)
+
+Media flows peer-to-peer. A 1:1 call needs one connection per side; a group call
+of *n* participants needs each client to hold *n − 1* connections (a full
+mesh). That is fine up to the enforced `CALL_MAX_PARTICIPANTS` ceiling, but it
+is not a path to large rooms — past a handful of participants the bandwidth and
+CPU cost lands on the *weakest* client and grows linearly. Scaling further
+requires a Selective Forwarding Unit that terminates media on the server, which
+is deliberately out of scope: it is infrastructure rather than application
+code, and it would contradict the "media never touches the server" property
+this phase is built on.
+
 ## Error codes
 
 `error.code` mirrors the REST error codes: `VALIDATION_ERROR`, `NOT_FOUND`,
 `FORBIDDEN`, `RATE_LIMITED`, `INTERNAL_ERROR`, plus socket-specific
-`INVALID_PAYLOAD` and `UNKNOWN_EVENT`.
+`INVALID_PAYLOAD` and `UNKNOWN_EVENT`. Calling frames report failures this way
+too, with `request_id` echoed when the client supplied one, so an unsupported
+call (not connected, already busy, call gone) is reported on the socket that
+asked for it rather than tearing the connection down.

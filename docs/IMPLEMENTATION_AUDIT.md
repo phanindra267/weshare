@@ -39,6 +39,11 @@ phases land.
 | 3 | One-to-One Real-Time Messaging | Verified | `000007_messaging` |
 | 4 | Groups, Media, Voice | Verified | `000008_groups` |
 | 5 | Moments, Social, Discover | Verified | `000009_feed` |
+| 6 | Media, Attachments, and Voice Messages | Verified | `000010_attachments` |
+| 7 | Moments and Social Feed | Verified | `000011_moments_features` |
+| 9 | Audio and Video Calling | Verified | `000012_calls` |
+
+There is no Phase 8 in the plan.
 
 ## Existing files (high level)
 
@@ -51,6 +56,8 @@ phases land.
 - `internal/contacts/*`
 - `internal/messaging/*`, `internal/realtime/*`
 - `internal/feed/*` (Moments: store, service, handler, DTOs, events, errors)
+- `internal/calls/*` (Calling: models, errors, events, store, service, DTOs,
+  handler)
 - `migrations/*.sql`, `migrations/migrations.go`
 
 ### Frontend
@@ -59,7 +66,7 @@ phases land.
 - `src/lib/*` (api, env, cn, media), `src/types/*`
 - `src/components/ui/*`, `src/components/layout/*` (AppHeader, …)
 - `src/features/auth`, `features/contacts`, `features/presence`,
-  `features/messaging`, `features/moments`
+  `features/messaging`, `features/moments`, `features/calls`
 - Configs: vitest.config.mts, vitest.setup.ts, playwright.config.ts,
   tsconfig.json, eslint.config.mjs, .prettierrc.json
 
@@ -69,38 +76,57 @@ phases land.
 
 ## Missing / planned (by phase)
 
-- **Phase 6 — WebRTC Calls:** audio/video signalling over the realtime hub,
-  ICE config, call history, in-call UI. `call.*` events are reserved in the
-  WebSocket contract.
-- **Phase 7 — Notifications, Search, Sync:** `notification.created` event
-  reserved; message/contact search; offline sync hardening.
-- **Phase 8 — Demo wallet.**
-- **Phase 9 — Mini-apps.**
-- **Phase 10 — Settings, privacy, accessibility.**
-- **Phase 11 — Schema hardening, OpenAPI expansion.**
-- **Phase 12 — Security.**
-- **Phase 13 — Full E2E test suite.**
-- **Phase 14 — Polish.**
-- **Phase 15 — Performance.**
-- **Phase 16 — Docs completion.**
+**Numbering reconciliation.** An earlier revision of this list numbered WebRTC
+calls "Phase 6" and notifications/search/sync "Phase 7". Those numbers were
+already spent by the time calling landed: Phase 6 is Media/Attachments/Voice and
+Phase 7 is Moments and Social Feed (both Verified, see the table above). Calling
+therefore shipped as **Phase 9**, and the remaining areas below are listed by
+name rather than by a number, so nothing has to be renumbered twice.
+
+- **Notifications, Search, Sync:** `notification.created` is reserved in the
+  WebSocket contract but not emitted; message/contact search; multi-page offline
+  sync catch-up (currently one 200-message page per reconnect).
+- **Chat power features:** message edit/delete/reply/forward/react/pin/search —
+  schema (`edited_at`, `deleted_at`) and contract placeholders exist, no write
+  path yet.
+- **Demo wallet.**
+- **Mini-apps.**
+- **Settings, privacy, accessibility.**
+- **Schema hardening and OpenAPI expansion:** the REST contract covers System,
+  Messaging, Media, Moments, and Calls; Auth, Users, and Contacts are still
+  undocumented there.
+- **Security review.**
+- **Full E2E suite expansion.**
+- **Polish.**
+- **Performance.**
+- **Docs completion.**
 
 Cross-cutting gaps: no `users` package unit tests; message edit/delete write
-path not implemented; in-memory rate limiting; single-page `sync` catch-up.
+path not implemented; in-memory rate limiting (not distributed); single-page
+`sync` catch-up; group calls are a peer-to-peer mesh bounded by
+`CALL_MAX_PARTICIPANTS` with no SFU.
 
 ## Risks/notes
 
 - Docker Compose Postgres uses port 5433 (5432 occupied on this machine).
-- WebRTC E2E cannot be fully automated without fake media devices; manual
-  verification will be documented.
+- Calling E2E runs against Chromium's fake media devices
+  (`--use-fake-device-for-media-stream`, `--use-fake-ui-for-media-stream`), so
+  real hardware is never exercised; the suite asserts that a peer connection
+  reaches `connected` and that remote video is decoding frames, not that a
+  particular pixel or sound arrived.
+- `ICE_SERVERS` defaults to empty, leaving only host candidates. That is correct
+  on localhost but insufficient across NATs; TURN is deployment-specific and
+  deliberately not assumed.
 - No `make` on Windows; PowerShell scripts provided.
 - Transitive dev-only npm advisory (braces/micromatch) noted; not runtime.
 - No psql CLI installed; use `docker exec` if needed.
 
 ## Conclusion
 
-Phases 0 (foundation) through 5 (Moments, Social, Discover) are complete and
-verified — see `docs/PHASE_STATUS.md` for actual test results. All Go gates
-(build/vet/gofmt/test across 11 packages) and frontend gates
-(lint/typecheck/39 tests/build) pass, and the live browser E2E suites
-(`messaging`, `groups`, `moments`) pass 3/3. The ordered plan for the next phase
-lives in `docs/NEXT_STEPS.md` (Phase 6 — WebRTC Calls).
+Phases 0 (foundation) through 7 (Moments and Social Feed) plus 9 (Audio and
+Video Calling) are complete and verified — see `docs/PHASE_STATUS.md` for actual
+test results. All Go gates (build/vet/gofmt/test) and frontend gates
+(lint/typecheck/tests/build) pass, and the live browser E2E suites
+(`messaging`, `groups`, `moments`, `calls`) pass against a real API, database,
+and two real browser contexts. The ordered plan for the next phase lives in
+`docs/NEXT_STEPS.md`.

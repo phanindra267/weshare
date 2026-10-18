@@ -18,6 +18,7 @@ import type {
   ContactRequest,
   UserBrief,
 } from "@/features/contacts/types";
+import { ContactCallButtons } from "@/features/calls/ContactCallButtons";
 
 interface Data {
   contacts: Contact[];
@@ -291,6 +292,7 @@ export function ContactsView() {
             <ul className="flex flex-col gap-2">
               {data.contacts.map((c) => (
                 <UserRow key={c.user.id} user={c.user}>
+                  <ContactCallButtons contact={c.user} />
                   <Button
                     variant="secondary"
                     size="sm"

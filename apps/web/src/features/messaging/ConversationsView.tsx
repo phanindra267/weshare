@@ -19,6 +19,7 @@ import { MessageList } from "@/features/messaging/MessageList";
 import { MessageComposer } from "@/features/messaging/MessageComposer";
 import { CreateGroupDialog } from "@/features/messaging/CreateGroupDialog";
 import { GroupInfoDialog } from "@/features/messaging/GroupInfoDialog";
+import { ConversationCallButtons } from "@/features/calls/ConversationCallButtons";
 import { applyReceipt, mergeMany, mergeMessage } from "@/features/messaging/thread";
 import { conversationName } from "@/features/messaging/format";
 import type {
@@ -749,6 +750,7 @@ export function ConversationsView() {
                   <span className="text-ink-muted text-xs">offline</span>
                 )}
               </div>
+              <ConversationCallButtons conversation={selected} />
               {selected.kind === "group" ? (
                 <Button
                   variant="ghost"
