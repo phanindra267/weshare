@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/phanindra267/weshare/services/api/internal/notifications"
 )
 
 const (
@@ -21,6 +23,12 @@ const (
 // "unavailable" (offline) from "ringing".
 type Publisher interface {
 	PublishToUser(userID uuid.UUID, event any) bool
+}
+
+// Notifier creates a notification for a user. It is satisfied by
+// *notifications.Service; a nil notifier disables notification creation.
+type Notifier interface {
+	Notify(ctx context.Context, in notifications.Input) error
 }
 
 // store is the persistence surface the service depends on. *Store implements
@@ -41,6 +49,7 @@ type store interface {
 type Service struct {
 	st              store
 	pub             Publisher
+	notifier        Notifier
 	maxParticipants int
 	now             func() time.Time
 
@@ -66,6 +75,25 @@ func NewService(st store, pub Publisher, maxParticipants int) *Service {
 
 // MaxParticipants is the scoped participant ceiling for a single call.
 func (s *Service) MaxParticipants() int { return s.maxParticipants }
+
+// SetNotifier wires notification creation, which is optional so tests and
+// embedders can skip it.
+func (s *Service) SetNotifier(n Notifier) { s.notifier = n }
+
+// notifyMissed records a missed-call notification for a callee that was rung
+// but never joined. Failures are ignored: the call itself must still proceed.
+func (s *Service) notifyMissed(ctx context.Context, caller, callee, callID uuid.UUID, kind string) {
+	if s.notifier == nil {
+		return
+	}
+	_ = s.notifier.Notify(ctx, notifications.Input{
+		UserID:  callee,
+		Type:    notifications.TypeMissedCall,
+		ActorID: &caller,
+		CallID:  &callID,
+		Data:    map[string]any{"kind": kind},
+	})
+}
 
 // Handle dispatches one client -> server call frame.
 func (s *Service) Handle(ctx context.Context, from uuid.UUID, f ClientFrame) error {
@@ -190,6 +218,8 @@ func (s *Service) Invite(ctx context.Context, from uuid.UUID, in ClientFrame) er
 		if !ok {
 			s.removeFromCall(callID, id, ParticipantMissed)
 			s.publish(from, UnavailableEvent{Type: EventUnavailable, CallID: callID.String(), UserID: id.String()})
+			// The callee was unreachable; leave them a missed-call record.
+			s.notifyMissed(ctx, from, id, callID, kind)
 			continue
 		}
 		delivered++
@@ -318,6 +348,7 @@ func (s *Service) End(ctx context.Context, from uuid.UUID, callIDStr string) err
 	}
 	group := call.group
 	started := !call.startedAt.IsZero()
+	kind := call.kind
 	delete(call.invited, from)
 	delete(call.joined, from)
 	if s.userCall[from] == callID {
@@ -353,6 +384,8 @@ func (s *Service) End(ctx context.Context, from uuid.UUID, callIDStr string) err
 	for _, id := range remainingInvited {
 		_ = s.st.SetParticipantState(ctx, callID, id, ParticipantMissed)
 		s.publish(id, EndedEvent{Type: EventEnded, CallID: callIDStr, Reason: EndCancelled, UserID: from.String()})
+		// A callee that was never answered when the call tore down missed it.
+		s.notifyMissed(ctx, from, id, callID, kind)
 	}
 	s.finish(ctx, callID, status)
 	return nil

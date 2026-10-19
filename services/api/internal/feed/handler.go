@@ -43,6 +43,11 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup, requireAuth gin.HandlerFun
 	g.GET("/:id/comments", h.Comments)
 	g.POST("/:id/comments", h.AddComment)
 	g.DELETE("/:id/comments/:commentId", h.DeleteComment)
+
+	// Phase 8 discovery surfaces query moments but live outside the /moments
+	// collection so they cannot clash with the /moments/:id parameter route.
+	rg.GET("/search/posts", requireAuth, h.SearchPosts)
+	rg.GET("/discover/moments", requireAuth, h.DiscoverMoments)
 }
 
 // Feed lists moments from the caller and their friends, newest first.
@@ -63,7 +68,7 @@ func (h *Handler) Feed(c *gin.Context) {
 		h.fail(c, err)
 		return
 	}
-	httpx.OK(c, httpx.NewPaginated(toMomentResponses(moments), next))
+	httpx.OK(c, httpx.NewPaginated(ToMomentResponses(moments), next))
 }
 
 // Create publishes a new moment.
@@ -325,6 +330,49 @@ func (h *Handler) DeleteComment(c *gin.Context) {
 	httpx.NoContent(c)
 }
 
+// SearchPosts handles GET /search/posts: text search over moments visible to
+// the caller.
+func (h *Handler) SearchPosts(c *gin.Context) {
+	user, ok := auth.CurrentUser(c)
+	if !ok {
+		httpx.Error(c, httpx.Unauthorized(""))
+		return
+	}
+	moments, next, err := h.svc.SearchPosts(c.Request.Context(), user.ID,
+		c.Query("q"), c.Query("cursor"), queryLimit(c))
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	httpx.OK(c, httpx.NewPaginated(ToMomentResponses(moments), next))
+}
+
+// DiscoverMoments handles GET /discover/moments: the newest public moments.
+func (h *Handler) DiscoverMoments(c *gin.Context) {
+	user, ok := auth.CurrentUser(c)
+	if !ok {
+		httpx.Error(c, httpx.Unauthorized(""))
+		return
+	}
+	moments, next, err := h.svc.Discover(c.Request.Context(), user.ID,
+		c.Query("cursor"), queryLimit(c))
+	if err != nil {
+		h.fail(c, err)
+		return
+	}
+	httpx.OK(c, httpx.NewPaginated(ToMomentResponses(moments), next))
+}
+
+// queryLimit parses the optional `limit` query parameter; 0 means "unset".
+func queryLimit(c *gin.Context) int {
+	if raw := c.Query("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			return n
+		}
+	}
+	return 0
+}
+
 // momentID parses the :id parameter, rendering a 404 when it is not a UUID.
 func (h *Handler) momentID(c *gin.Context) (uuid.UUID, bool) {
 	id, err := uuid.Parse(c.Param("id"))
@@ -341,7 +389,7 @@ func (h *Handler) fail(c *gin.Context, err error) {
 	switch {
 	case errors.As(err, &invalid):
 		httpx.Error(c, httpx.Validation("Please fix the highlighted fields.",
-			gin.H{invalid.Field: invalid.Message}))
+			gin.H{"fields": map[string]string{invalid.Field: invalid.Message}}))
 	case errors.Is(err, ErrMomentNotFound), errors.Is(err, ErrCommentNotFound):
 		httpx.Error(c, httpx.NotFound("The requested post was not found."))
 	case errors.Is(err, ErrNotAuthor):

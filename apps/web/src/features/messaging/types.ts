@@ -5,6 +5,7 @@
  */
 
 import type { MomentCreatedEvent } from "@/features/moments/types";
+import type { NotificationCreatedEvent } from "@/features/notifications/types";
 import type {
   CallAcceptedEvent,
   CallBusyEvent,
@@ -236,6 +237,7 @@ export type ServerEvent =
   | ConversationUpdatedEvent
   | MemberChangedEvent
   | MomentCreatedEvent
+  | NotificationCreatedEvent
   | RealtimeErrorEvent
   | PongEvent
   | CallIncomingEvent

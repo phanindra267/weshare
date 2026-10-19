@@ -20,24 +20,28 @@ import (
 	"github.com/phanindra267/weshare/services/api/internal/media"
 	"github.com/phanindra267/weshare/services/api/internal/messaging"
 	"github.com/phanindra267/weshare/services/api/internal/middleware"
+	"github.com/phanindra267/weshare/services/api/internal/notifications"
 	"github.com/phanindra267/weshare/services/api/internal/realtime"
+	"github.com/phanindra267/weshare/services/api/internal/search"
 	"github.com/phanindra267/weshare/services/api/internal/users"
 )
 
 // Options are the dependencies required to build the router.
 type Options struct {
-	Config    *config.Config
-	Logger    *slog.Logger
-	DB        *database.DB
-	Health    *health.Handler
-	Auth      *auth.Handler
-	Users     *users.Handler
-	Media     *media.Handler
-	Contacts  *contacts.Handler
-	Messaging *messaging.Handler
-	Realtime  *realtime.Handler
-	Feed      *feed.Handler
-	Calls     *calls.Handler
+	Config        *config.Config
+	Logger        *slog.Logger
+	DB            *database.DB
+	Health        *health.Handler
+	Auth          *auth.Handler
+	Users         *users.Handler
+	Media         *media.Handler
+	Contacts      *contacts.Handler
+	Messaging     *messaging.Handler
+	Realtime      *realtime.Handler
+	Feed          *feed.Handler
+	Calls         *calls.Handler
+	Notifications *notifications.Handler
+	Search        *search.Handler
 }
 
 // New builds the configured Gin engine.
@@ -122,5 +126,11 @@ func registerAPIRoutes(api *gin.RouterGroup, opts Options) {
 	}
 	if opts.Calls != nil && opts.Auth != nil {
 		opts.Calls.RegisterRoutes(api, opts.Auth.RequireAuth())
+	}
+	if opts.Notifications != nil && opts.Auth != nil {
+		opts.Notifications.RegisterRoutes(api, opts.Auth.RequireAuth())
+	}
+	if opts.Search != nil && opts.Auth != nil {
+		opts.Search.RegisterRoutes(api, opts.Auth.RequireAuth())
 	}
 }

@@ -7,17 +7,27 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+
+	"github.com/phanindra267/weshare/services/api/internal/notifications"
 )
 
 const (
 	defaultPageSize = 20
 	maxPageSize     = 50
+	// maxSearchQueryRunes caps the length of a post-search query.
+	maxSearchQueryRunes = 100
 )
 
 // Publisher fans realtime events out to connected users. The realtime hub
 // implements it; unit tests can supply a stub.
 type Publisher interface {
 	PublishToUser(userID uuid.UUID, event any) bool
+}
+
+// Notifier creates a notification for a user. It is satisfied by
+// *notifications.Service; a nil notifier disables notification creation.
+type Notifier interface {
+	Notify(ctx context.Context, in notifications.Input) error
 }
 
 // store is the persistence surface the service depends on. *Store implements
@@ -27,6 +37,8 @@ type store interface {
 	UpdateMoment(ctx context.Context, id, author uuid.UUID, body, visibility *string) (Moment, error)
 	GetMoment(ctx context.Context, viewer, id uuid.UUID) (Moment, error)
 	ListFeed(ctx context.Context, viewer uuid.UUID, afterCreated *time.Time, afterID *uuid.UUID, limit int) ([]Moment, error)
+	SearchMoments(ctx context.Context, viewer uuid.UUID, query string, afterCreated *time.Time, afterID *uuid.UUID, limit int) ([]Moment, error)
+	ListPublicMoments(ctx context.Context, viewer uuid.UUID, afterCreated *time.Time, afterID *uuid.UUID, limit int) ([]Moment, error)
 	SoftDeleteMoment(ctx context.Context, id uuid.UUID) error
 	HideMoment(ctx context.Context, viewer, momentID uuid.UUID) error
 	ReportMoment(ctx context.Context, reporter, momentID uuid.UUID, reason, details string) error
@@ -43,12 +55,26 @@ type store interface {
 
 // Service holds the Moments use cases.
 type Service struct {
-	st  store
-	pub Publisher
+	st       store
+	pub      Publisher
+	notifier Notifier
 }
 
 // NewService builds a feed Service. A nil publisher disables realtime fan-out.
 func NewService(st store, pub Publisher) *Service { return &Service{st: st, pub: pub} }
+
+// SetNotifier wires notification creation, which is optional so REST-only
+// tests and embedders can skip it.
+func (s *Service) SetNotifier(n Notifier) { s.notifier = n }
+
+// notify creates a notification, ignoring failures: a like or comment must
+// still succeed if the notification store is unavailable.
+func (s *Service) notify(ctx context.Context, in notifications.Input) {
+	if s.notifier == nil {
+		return
+	}
+	_ = s.notifier.Notify(ctx, in)
+}
 
 // CreateMomentInput is a request to publish a moment.
 type CreateMomentInput struct {
@@ -165,6 +191,52 @@ func (s *Service) Feed(ctx context.Context, viewer uuid.UUID, cursor string, lim
 	return moments, next, nil
 }
 
+// SearchPosts returns one page of the viewer's visible moments whose body
+// matches query, newest first, plus the cursor for the next page.
+func (s *Service) SearchPosts(ctx context.Context, viewer uuid.UUID, query, cursor string, limit int) ([]Moment, string, error) {
+	q, err := normalizeSearchQuery(query)
+	if err != nil {
+		return nil, "", err
+	}
+	created, afterID, err := decodeCursor(cursor)
+	if err != nil {
+		return nil, "", &ValidationError{Field: "cursor", Message: "invalid cursor"}
+	}
+	clamped := clampLimit(limit)
+	moments, err := s.st.SearchMoments(ctx, viewer, escapeLike(q), created, afterID, clamped+1)
+	if err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(moments) > clamped {
+		last := moments[clamped-1]
+		next = encodeCursor(last.CreatedAt, last.ID)
+		moments = moments[:clamped]
+	}
+	return moments, next, nil
+}
+
+// Discover returns one page of public moments from across the app, newest
+// first, for the Discover landing page.
+func (s *Service) Discover(ctx context.Context, viewer uuid.UUID, cursor string, limit int) ([]Moment, string, error) {
+	created, afterID, err := decodeCursor(cursor)
+	if err != nil {
+		return nil, "", &ValidationError{Field: "cursor", Message: "invalid cursor"}
+	}
+	clamped := clampLimit(limit)
+	moments, err := s.st.ListPublicMoments(ctx, viewer, created, afterID, clamped+1)
+	if err != nil {
+		return nil, "", err
+	}
+	next := ""
+	if len(moments) > clamped {
+		last := moments[clamped-1]
+		next = encodeCursor(last.CreatedAt, last.ID)
+		moments = moments[:clamped]
+	}
+	return moments, next, nil
+}
+
 // Delete removes a moment if the viewer is the author.
 func (s *Service) Delete(ctx context.Context, viewer, id uuid.UUID) error {
 	moment, err := s.st.GetMoment(ctx, viewer, id)
@@ -193,11 +265,23 @@ func (s *Service) Report(ctx context.Context, reporter, id uuid.UUID, in ReportI
 
 // Like adds a like from the viewer, returning the updated count.
 func (s *Service) Like(ctx context.Context, viewer, momentID uuid.UUID) (int64, error) {
-	if err := s.ensureVisible(ctx, viewer, momentID); err != nil {
+	moment, err := s.visibleMoment(ctx, viewer, momentID)
+	if err != nil {
 		return 0, err
 	}
 	if _, err := s.st.Like(ctx, momentID, viewer); err != nil {
 		return 0, err
+	}
+	// Notify the author (never yourself) that their moment was liked.
+	if moment.Author.ID != viewer {
+		author := moment.Author.ID
+		s.notify(ctx, notifications.Input{
+			UserID:   author,
+			Type:     notifications.TypeMomentLike,
+			ActorID:  &viewer,
+			MomentID: &momentID,
+			Data:     map[string]any{"preview": previewText(moment.Body)},
+		})
 	}
 	return s.st.LikeCount(ctx, momentID)
 }
@@ -238,14 +322,30 @@ func (s *Service) Comments(ctx context.Context, viewer, momentID uuid.UUID, curs
 
 // AddComment appends a comment (or reply) to a visible moment.
 func (s *Service) AddComment(ctx context.Context, viewer, momentID uuid.UUID, text string, replyToID *uuid.UUID) (Comment, error) {
-	if err := s.ensureVisible(ctx, viewer, momentID); err != nil {
+	moment, err := s.visibleMoment(ctx, viewer, momentID)
+	if err != nil {
 		return Comment{}, err
 	}
 	text = strings.TrimSpace(text)
 	if text == "" || len([]rune(text)) > maxCommentRunes {
 		return Comment{}, &ValidationError{Field: "body", Message: "must be between 1 and 1000 characters"}
 	}
-	return s.st.AddComment(ctx, momentID, viewer, text, replyToID)
+	comment, err := s.st.AddComment(ctx, momentID, viewer, text, replyToID)
+	if err != nil {
+		return Comment{}, err
+	}
+	// Notify the moment's author (never yourself) about the new comment.
+	if moment.Author.ID != viewer {
+		author := moment.Author.ID
+		s.notify(ctx, notifications.Input{
+			UserID:   author,
+			Type:     notifications.TypeMomentComment,
+			ActorID:  &viewer,
+			MomentID: &momentID,
+			Data:     map[string]any{"preview": truncate(text, 140)},
+		})
+	}
+	return comment, nil
 }
 
 // DeleteComment removes a comment when the viewer wrote it or authored the
@@ -263,11 +363,33 @@ func (s *Service) DeleteComment(ctx context.Context, viewer, commentID uuid.UUID
 
 // ensureVisible loads a moment and enforces visibility.
 func (s *Service) ensureVisible(ctx context.Context, viewer, id uuid.UUID) error {
+	_, err := s.visibleMoment(ctx, viewer, id)
+	return err
+}
+
+// visibleMoment loads a moment and enforces visibility, returning it so callers
+// that need the author (to notify them) can use it.
+func (s *Service) visibleMoment(ctx context.Context, viewer, id uuid.UUID) (Moment, error) {
 	moment, err := s.st.GetMoment(ctx, viewer, id)
 	if err != nil {
-		return err
+		return Moment{}, err
 	}
-	return s.authorizeView(ctx, moment, viewer)
+	if err := s.authorizeView(ctx, moment, viewer); err != nil {
+		return Moment{}, err
+	}
+	return moment, nil
+}
+
+// previewText trims a moment body to a short snippet for a notification.
+func previewText(body string) string { return truncate(strings.TrimSpace(body), 140) }
+
+// truncate shortens s to at most max runes, appending an ellipsis when cut.
+func truncate(s string, max int) string {
+	runes := []rune(s)
+	if len(runes) <= max {
+		return s
+	}
+	return string(runes[:max]) + "…"
 }
 
 func (s *Service) authorizeView(ctx context.Context, moment Moment, viewer uuid.UUID) error {
@@ -314,6 +436,25 @@ func normalizeVisibility(v string) (string, error) {
 	default:
 		return "", &ValidationError{Field: "visibility", Message: "must be friends, public, or private"}
 	}
+}
+
+// normalizeSearchQuery trims a post-search query and rejects it when empty or
+// over-long.
+func normalizeSearchQuery(raw string) (string, error) {
+	q := strings.TrimSpace(raw)
+	if q == "" {
+		return "", &ValidationError{Field: "q", Message: "is required"}
+	}
+	if len([]rune(q)) > maxSearchQueryRunes {
+		return "", &ValidationError{Field: "q", Message: "is too long"}
+	}
+	return q, nil
+}
+
+// escapeLike escapes LIKE metacharacters so a query of "50%" matches a literal
+// percent sign instead of every row.
+func escapeLike(q string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
 }
 
 func clampLimit(limit int) int {

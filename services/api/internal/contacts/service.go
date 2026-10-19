@@ -4,6 +4,8 @@ import (
 	"context"
 
 	"github.com/google/uuid"
+
+	"github.com/phanindra267/weshare/services/api/internal/notifications"
 )
 
 // contactStore is the persistence surface the service depends on. The real
@@ -30,13 +32,33 @@ const (
 	maxListLimit     = 200
 )
 
+// Notifier creates a notification for a user. It is satisfied by
+// *notifications.Service; a nil notifier disables notification creation.
+type Notifier interface {
+	Notify(ctx context.Context, in notifications.Input) error
+}
+
 // Service implements the contacts domain rules on top of a contactStore.
 type Service struct {
-	store contactStore
+	store    contactStore
+	notifier Notifier
 }
 
 // NewService builds a contacts Service.
 func NewService(store contactStore) *Service { return &Service{store: store} }
+
+// SetNotifier wires notification creation, which is optional so REST-only
+// tests and embedders can skip it.
+func (s *Service) SetNotifier(n Notifier) { s.notifier = n }
+
+// notify creates a notification, ignoring failures: a contact request or
+// acceptance must still succeed if the notification store is unavailable.
+func (s *Service) notify(ctx context.Context, in notifications.Input) {
+	if s.notifier == nil {
+		return
+	}
+	_ = s.notifier.Notify(ctx, in)
+}
 
 // clampLimit bounds a caller-supplied page size.
 func clampLimit(limit int) int {
@@ -96,6 +118,12 @@ func (s *Service) SendRequest(ctx context.Context, from, to uuid.UUID) (Request,
 		if err != nil {
 			return Request{}, ProfileBrief{}, err
 		}
+		// The peer's pending request became a connection because of us.
+		s.notify(ctx, notifications.Input{
+			UserID:  to,
+			Type:    notifications.TypeContactAccepted,
+			ActorID: &from,
+		})
 		return accepted, s.brief(ctx, to), nil
 	}
 
@@ -103,6 +131,11 @@ func (s *Service) SendRequest(ctx context.Context, from, to uuid.UUID) (Request,
 	if err != nil {
 		return Request{}, ProfileBrief{}, err
 	}
+	s.notify(ctx, notifications.Input{
+		UserID:  to,
+		Type:    notifications.TypeContactRequest,
+		ActorID: &from,
+	})
 	return req, s.brief(ctx, to), nil
 }
 
@@ -124,6 +157,12 @@ func (s *Service) AcceptRequest(ctx context.Context, requestID, me uuid.UUID) (R
 	if err != nil {
 		return Request{}, ProfileBrief{}, err
 	}
+	// Tell the original requester their request was accepted.
+	s.notify(ctx, notifications.Input{
+		UserID:  req.UserID,
+		Type:    notifications.TypeContactAccepted,
+		ActorID: &me,
+	})
 	return accepted, s.brief(ctx, req.UserID), nil
 }
 

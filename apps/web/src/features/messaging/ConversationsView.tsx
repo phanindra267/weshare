@@ -86,6 +86,14 @@ export function ConversationsView() {
     new Map<string, ReturnType<typeof setTimeout>>(),
   );
   const readTimer = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Multi-page catch-up bookkeeping: the last cursor we requested per
+  // conversation, so a non-advancing cursor cannot spin forever.
+  const syncAfterRef = React.useRef(new Map<string, number>());
+  const sendEventRef = React.useRef(realtime.send);
+
+  React.useEffect(() => {
+    sendEventRef.current = realtime.send;
+  }, [realtime]);
 
   React.useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -288,9 +296,25 @@ export function ConversationsView() {
           break;
         }
         case "sync.result": {
-          if (event.conversation_id === selectedIdRef.current) {
+          const convId = event.conversation_id;
+          if (convId === selectedIdRef.current) {
             setMessages((prev) => mergeMany(prev, event.messages));
           }
+          // Multi-page catch-up: while the server reports more pages, request
+          // the next one. The cursor advances monotonically; if it ever fails
+          // to advance we stop, so a reconnect can never spin forever.
+          const cursor = event.next_cursor;
+          const after = cursor ? Number(cursor) : 0;
+          if (!cursor || !Number.isFinite(after) || after <= 0) {
+            syncAfterRef.current.delete(convId);
+            break;
+          }
+          if (syncAfterRef.current.get(convId) === after) {
+            syncAfterRef.current.delete(convId);
+            break;
+          }
+          syncAfterRef.current.set(convId, after);
+          sendEventRef.current({ type: "sync", conversation_id: convId, after });
           break;
         }
         case "conversation.updated": {
@@ -416,6 +440,8 @@ export function ConversationsView() {
       (acc, m) => (m.pending ? acc : Math.max(acc, m.sequence_no)),
       0,
     );
+    // Fresh catch-up for this thread: forget any previous cursor.
+    syncAfterRef.current.delete(convId);
     sendEvent({ type: "sync", conversation_id: convId, after });
   }, [connectionId, sendEvent, loadConversations]);
 
@@ -426,6 +452,8 @@ export function ConversationsView() {
     setThreadError(null);
     setHasMore(false);
     setMembers(null);
+    // Opening a thread is a fresh view of it; drop any catch-up cursor.
+    syncAfterRef.current.delete(id);
   }, []);
 
   const loadOlder = React.useCallback(() => {

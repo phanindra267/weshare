@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { Button } from "@/components/ui/Button";
 import { useAuth } from "@/features/auth/AuthProvider";
+import { NotificationBell } from "@/features/notifications/NotificationBell";
 
 /**
  * Top navigation that reflects the current session. Renders nothing until the
@@ -37,6 +38,12 @@ export function AppHeader() {
                 Moments
               </Link>
               <Link
+                href="/discover"
+                className="text-ink-muted hover:text-ink text-sm"
+              >
+                Discover
+              </Link>
+              <Link
                 href="/messages"
                 className="text-ink-muted hover:text-ink text-sm"
               >
@@ -48,6 +55,13 @@ export function AppHeader() {
               >
                 Contacts
               </Link>
+              <Link
+                href="/search"
+                className="text-ink-muted hover:text-ink text-sm"
+              >
+                Search
+              </Link>
+              <NotificationBell />
               <Link
                 href="/profile"
                 className="text-ink-muted hover:text-ink text-sm"

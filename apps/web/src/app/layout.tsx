@@ -5,6 +5,7 @@ import { AuthProvider } from "@/features/auth/AuthProvider";
 import { AppHeader } from "@/components/layout/AppHeader";
 import { PresenceHeartbeat } from "@/features/presence/PresenceHeartbeat";
 import { RealtimeProvider } from "@/features/messaging/RealtimeProvider";
+import { NotificationsProvider } from "@/features/notifications/NotificationsProvider";
 import { CallProvider } from "@/features/calls/CallProvider";
 import { CallOverlay } from "@/features/calls/CallOverlay";
 
@@ -49,10 +50,12 @@ export default function RootLayout({ children }: LayoutProps<"/">) {
           <AuthProvider>
             <RealtimeProvider>
               <CallProvider>
-                <AppHeader />
-                <PresenceHeartbeat />
-                <CallOverlay />
-                {children}
+                <NotificationsProvider>
+                  <AppHeader />
+                  <PresenceHeartbeat />
+                  <CallOverlay />
+                  {children}
+                </NotificationsProvider>
               </CallProvider>
             </RealtimeProvider>
           </AuthProvider>

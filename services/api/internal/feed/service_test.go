@@ -3,6 +3,7 @@ package feed
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -48,6 +49,10 @@ type fakeStore struct {
 
 	// configurable results / errors
 	feed               []Moment
+	searchHits         []Moment
+	publicHits         []Moment
+	gotSearchQuery     string
+	gotDiscoverLimit   int
 	createdMomentID    uuid.UUID
 	createErr          error
 	getErr             error
@@ -207,6 +212,22 @@ func (fs *fakeStore) ListFeed(ctx context.Context, viewer uuid.UUID, afterCreate
 		return nil, fs.listErr
 	}
 	return fs.feed, nil
+}
+
+func (fs *fakeStore) SearchMoments(ctx context.Context, viewer uuid.UUID, query string, afterCreated *time.Time, afterID *uuid.UUID, limit int) ([]Moment, error) {
+	fs.gotSearchQuery = query
+	if fs.listErr != nil {
+		return nil, fs.listErr
+	}
+	return fs.searchHits, nil
+}
+
+func (fs *fakeStore) ListPublicMoments(ctx context.Context, viewer uuid.UUID, afterCreated *time.Time, afterID *uuid.UUID, limit int) ([]Moment, error) {
+	fs.gotDiscoverLimit = limit
+	if fs.listErr != nil {
+		return nil, fs.listErr
+	}
+	return fs.publicHits, nil
 }
 
 func (fs *fakeStore) SoftDeleteMoment(ctx context.Context, id uuid.UUID) error {
@@ -724,6 +745,90 @@ func TestFeedReturnsNoCursorOnLastPage(t *testing.T) {
 func TestFeedRejectsMalformedCursor(t *testing.T) {
 	svc := testService(newFakeStore(), nil)
 	_, _, err := svc.Feed(context.Background(), uuid.New(), "not-a-cursor", 0)
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Field != "cursor" {
+		t.Fatalf("expected cursor validation error, got %v", err)
+	}
+}
+
+func TestSearchPostsRequiresQuery(t *testing.T) {
+	svc := testService(newFakeStore(), nil)
+	_, _, err := svc.SearchPosts(context.Background(), uuid.New(), "   ", "", 0)
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Field != "q" {
+		t.Fatalf("expected q validation error, got %v", err)
+	}
+}
+
+func TestSearchPostsRejectsOverlongQuery(t *testing.T) {
+	svc := testService(newFakeStore(), nil)
+	_, _, err := svc.SearchPosts(context.Background(), uuid.New(), strings.Repeat("a", maxSearchQueryRunes+1), "", 0)
+	var ve *ValidationError
+	if !errors.As(err, &ve) || ve.Field != "q" {
+		t.Fatalf("expected q validation error, got %v", err)
+	}
+}
+
+func TestSearchPostsEscapesLikeMetacharacters(t *testing.T) {
+	author := uuid.New()
+	fs := newFakeStore()
+	fs.searchHits = []Moment{{ID: uuid.New(), Author: Author{ID: author}, CreatedAt: time.Now()}}
+	svc := testService(fs, nil)
+
+	if _, _, err := svc.SearchPosts(context.Background(), author, "50%_x", "", 0); err != nil {
+		t.Fatalf("SearchPosts: %v", err)
+	}
+	if fs.gotSearchQuery != `50\%\_x` {
+		t.Fatalf("query = %q, want escaped metacharacters", fs.gotSearchQuery)
+	}
+}
+
+func TestSearchPostsPaginates(t *testing.T) {
+	author := uuid.New()
+	fs := newFakeStore()
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	page := make([]Moment, defaultPageSize+1)
+	for i := range page {
+		page[i] = Moment{ID: uuid.New(), Author: Author{ID: author}, CreatedAt: base}
+	}
+	fs.searchHits = page
+	svc := testService(fs, nil)
+
+	moments, next, err := svc.SearchPosts(context.Background(), author, "hi", "", 0)
+	if err != nil {
+		t.Fatalf("SearchPosts: %v", err)
+	}
+	if len(moments) != defaultPageSize || next == "" {
+		t.Fatalf("len=%d next=%q, want %d and non-empty", len(moments), next, defaultPageSize)
+	}
+}
+
+func TestDiscoverReturnsPublicMomentsWithCursor(t *testing.T) {
+	author := uuid.New()
+	fs := newFakeStore()
+	base := time.Now().UTC().Truncate(time.Microsecond)
+	page := make([]Moment, defaultPageSize+1)
+	for i := range page {
+		page[i] = Moment{ID: uuid.New(), Author: Author{ID: author}, Visibility: VisibilityPublic, CreatedAt: base}
+	}
+	fs.publicHits = page
+	svc := testService(fs, nil)
+
+	moments, next, err := svc.Discover(context.Background(), author, "", 0)
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(moments) != defaultPageSize || next == "" {
+		t.Fatalf("len=%d next=%q, want %d and non-empty", len(moments), next, defaultPageSize)
+	}
+	if fs.gotDiscoverLimit != defaultPageSize+1 {
+		t.Fatalf("store limit = %d, want %d", fs.gotDiscoverLimit, defaultPageSize+1)
+	}
+}
+
+func TestDiscoverRejectsMalformedCursor(t *testing.T) {
+	svc := testService(newFakeStore(), nil)
+	_, _, err := svc.Discover(context.Background(), uuid.New(), "nope", 0)
 	var ve *ValidationError
 	if !errors.As(err, &ve) || ve.Field != "cursor" {
 		t.Fatalf("expected cursor validation error, got %v", err)

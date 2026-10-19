@@ -1,18 +1,23 @@
 # Next Steps
 
-**Current phase:** Phase 9 — Audio and Video Calling (Verified)
-**Next phase:** Notifications, Search, and Sync
+**Current phase:** Phase 8 — Discover and Global Search (Verified); Phase 10 —
+Notifications and Synchronization (Verified)
+**Next phase:** Phase 4 — Advanced Messaging
 
-Phases 0–7 and 9 are implemented and verified (the plan has no Phase 8). See
-`docs/PHASE_STATUS.md` for actual, reproducible test results — including the
-live browser E2E suites (`messaging`, `groups`, `moments`, `calls`) and the
-Go/frontend gate runs.
+Phases 0, 1–3, and 5–10 are implemented and verified. **Phase 4 — Advanced
+Messaging** (message edit, delete, reply, forward, react, pin, and in-chat
+search) is the only unstarted phase below the frontier. See
+`docs/PHASE_STATUS.md` for actual, reproducible test results — including the live
+browser E2E suites (`messaging`, `groups`, `moments`, `calls`) and the Go/
+frontend gate runs.
 
-**Numbering note.** Older revisions of this file called the calling work
-"Phase 6 — WebRTC Calls" and notifications "Phase 7". Those numbers were already
-taken by Media/Attachments/Voice (6) and Moments and Social Feed (7), so calling
-shipped as **Phase 9**. `docs/IMPLEMENTATION_AUDIT.md` now lists the remaining
-work by name instead of by number.
+**Numbering note.** Earlier revisions of this file claimed "the plan has no
+Phase 8". That was wrong: Phase 8 is **Discover and Global Search**, Phase 9 is
+Audio and Video Calling, and Phase 10 is Notifications and Synchronization. This
+file and `docs/PHASE_STATUS.md` now follow the master prompt; the reconciliation
+is recorded in `docs/PHASE_STATUS.md` and `docs/IMPLEMENTATION_AUDIT.md`. Older
+revisions also called the calling work "Phase 6" and notifications "Phase 7";
+those numbers belonged to Media/Attachments/Voice (6) and Moments (7).
 
 ## Immediate housekeeping
 
@@ -26,6 +31,44 @@ work by name instead of by number.
 3. **Message editing/deletion** — schema and contract placeholders exist
    (`edited_at`, `deleted_at`, `message.updated`/`message.deleted`) but no write
    path; schedule explicitly (see the user-facing "chat power features" list).
+
+## Phase 10 — Notifications and Synchronization (delivered)
+
+- **Schema** — `000013_notifications`: per-user rows with cascading optional FKs
+  (conversation/message/moment/call), a `data` JSONB payload, `read_at`, a
+  listing index `(user_id, created_at DESC, id DESC)`, and a partial unread
+  index.
+- **Backend** — `internal/notifications` (models, errors, events, store, service,
+  DTOs, handler). REST: `GET /notifications`, `GET /notifications/unread-count`,
+  `POST /notifications/read`, `DELETE /notifications/:id`, `DELETE /notifications`.
+  Triggers: `contact_request`/`contact_accepted` (contacts),
+  `moment_like`/`moment_comment` (feed), `missed_call` (calls). Delivery is
+  best-effort via a `notification.created` socket frame; persistence is the
+  source of truth.
+- **Frontend** — `NotificationBell` (unread badge) in `AppHeader`,
+  `NotificationsProvider` (loads on connect/reconnect, live-prepends on
+  `notification.created`, exposed as empty for signed-out visitors), and the
+  `/notifications` page.
+- **Contracts** — `openapi.yaml` Notifications tag/paths/schemas;
+  `websocket-events.md` moves `notification.created` to Implemented.
+
+## Phase 8 — Discover and Global Search (delivered)
+
+- **Backend** — moment search lives in `internal/feed` (`GET /search/posts`,
+  `GET /discover/moments`) and shares one SQL visibility predicate with the feed;
+  everything else lives in `internal/search` (`GET /search/{messages,users,
+  conversations,groups}` and `GET /discover/people`). All endpoints return the
+  standard paginated envelope, clamp `limit`, escape LIKE metacharacters, and
+  validate `q`/`kind`/`cursor` (failures → `422` with `{"fields": {...}}`).
+- **Frontend** — `/discover` (search shortcut, people suggestions with add-friend,
+  public-moments feed with load-more) and an upgraded `/search` (one query box,
+  an **All** tab plus Messages / People / Chats / Posts tabs, debounced,
+  load-more, loading/empty/error states); `Discover` link in `AppHeader`.
+- **Contracts** — `openapi.yaml` Search/Discover tags, paths, and schemas. No new
+  WebSocket events (search/discover are read-only).
+- **Deferred** — the discover **mini-app directory** and mini-app search are
+  Phase 12; the feature directories are empty scaffolding, so the directory is
+  documented rather than shipped as a dead end.
 
 ## Phase 9 — Audio and Video Calling (delivered)
 

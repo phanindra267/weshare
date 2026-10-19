@@ -24,7 +24,9 @@ import (
 	"github.com/phanindra267/weshare/services/api/internal/logging"
 	"github.com/phanindra267/weshare/services/api/internal/media"
 	"github.com/phanindra267/weshare/services/api/internal/messaging"
+	"github.com/phanindra267/weshare/services/api/internal/notifications"
 	"github.com/phanindra267/weshare/services/api/internal/realtime"
+	"github.com/phanindra267/weshare/services/api/internal/search"
 	"github.com/phanindra267/weshare/services/api/internal/users"
 )
 
@@ -93,27 +95,44 @@ func run() error {
 	contactsStore := contacts.NewStore(db)
 	hub := realtime.NewHub()
 	messagingService := messaging.NewService(messaging.NewStore(db), hub)
+
+	// Notifications are created by the features that produce them. The service
+	// persists each one and pushes a `notification.created` frame to the
+	// recipient's sockets through the same hub.
+	notificationsService := notifications.NewService(notifications.NewStore(db), hub)
+
+	contactsService := contacts.NewService(contactsStore)
+	contactsService.SetNotifier(notificationsService)
+
 	// The same hub fans out new Moments to a poster's friends.
 	feedService := feed.NewService(feed.NewStore(db), hub)
+	feedService.SetNotifier(notificationsService)
+
 	// ...and relays WebRTC call signalling between a call's participants.
 	callsService := calls.NewService(calls.NewStore(db), hub, cfg.CallMaxParticipants)
+	callsService.SetNotifier(notificationsService)
+
+	// Search reads directly from the message and profile tables.
+	searchService := search.NewService(search.NewStore(db))
 
 	attachmentStore := media.NewAttachmentStore(db)
 	mediaHandler := media.NewHandlerWithStore(storage, attachmentStore, cfg.MaxAttachmentBytes)
 
 	router := apihttp.New(apihttp.Options{
-		Config:    cfg,
-		Logger:    logger,
-		DB:        db,
-		Health:    health.NewHandler(db, cfg),
-		Auth:      auth.NewHandler(authService),
-		Users:     users.NewHandler(users.NewStore(db), storage, cfg),
-		Media:     mediaHandler,
-		Contacts:  contacts.NewHandler(contacts.NewService(contactsStore), cfg),
-		Messaging: messaging.NewHandler(messagingService, cfg),
-		Realtime:  realtime.NewHandler(messagingService, callsService, hub, contactsStore, cfg, logger),
-		Feed:      feed.NewHandler(feedService, cfg),
-		Calls:     calls.NewHandler(callsService, cfg),
+		Config:        cfg,
+		Logger:        logger,
+		DB:            db,
+		Health:        health.NewHandler(db, cfg),
+		Auth:          auth.NewHandler(authService),
+		Users:         users.NewHandler(users.NewStore(db), storage, cfg),
+		Media:         mediaHandler,
+		Contacts:      contacts.NewHandler(contactsService, cfg),
+		Messaging:     messaging.NewHandler(messagingService, cfg),
+		Realtime:      realtime.NewHandler(messagingService, callsService, hub, contactsStore, cfg, logger),
+		Feed:          feed.NewHandler(feedService, cfg),
+		Calls:         calls.NewHandler(callsService, cfg),
+		Notifications: notifications.NewHandler(notificationsService),
+		Search:        search.NewHandler(searchService, cfg),
 	})
 
 	srv := &http.Server{

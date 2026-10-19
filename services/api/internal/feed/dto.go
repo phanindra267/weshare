@@ -111,7 +111,9 @@ func toMomentResponse(m Moment) MomentResponse {
 	}
 }
 
-func toMomentResponses(moments []Moment) []MomentResponse {
+// ToMomentResponses maps a slice of moments for the wire. Exported so other
+// packages (e.g. search/discover) can serialise moments consistently.
+func ToMomentResponses(moments []Moment) []MomentResponse {
 	out := make([]MomentResponse, 0, len(moments))
 	for _, m := range moments {
 		out = append(out, toMomentResponse(m))

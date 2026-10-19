@@ -13,7 +13,7 @@ import { contactsApi } from "@/features/contacts/api";
 import type { Contact } from "@/features/contacts/types";
 import { momentsApi, type UploadedAttachment } from "./api";
 import type { Moment } from "./types";
-import { MomentCard } from "./MomentCard";
+import { MomentStack } from "./MomentStack";
 
 type Visibility = "friends" | "public" | "private";
 
@@ -194,68 +194,6 @@ export function MomentsView() {
     }
   };
 
-  const applyLike = (id: string, liked: boolean, count?: number) => {
-    setMoments((prev) =>
-      prev.map((m) =>
-        m.id === id
-          ? {
-              ...m,
-              liked_by_me: liked,
-              like_count:
-                count ?? Math.max(0, m.like_count + (liked ? 1 : -1)),
-            }
-          : m,
-      ),
-    );
-  };
-
-  const handleToggleLike = async (moment: Moment) => {
-    const liked = moment.liked_by_me;
-    // Optimistic update.
-    applyLike(moment.id, !liked);
-    try {
-      const result = liked
-        ? await momentsApi.unlike(moment.id)
-        : await momentsApi.like(moment.id);
-      setMoments((prev) =>
-        prev.map((m) =>
-          m.id === moment.id
-            ? { ...m, liked_by_me: result.liked, like_count: result.like_count }
-            : m,
-        ),
-      );
-    } catch (cause) {
-      applyLike(moment.id, liked, moment.like_count);
-      toast({
-        title: "Could not update reaction",
-        description: cause instanceof ApiError ? cause.message : undefined,
-        variant: "error",
-      });
-    }
-  };
-
-  const handleDelete = (moment: Moment) => {
-    setMoments((prev) => prev.filter((m) => m.id !== moment.id));
-  };
-
-  const handleUpdate = (updated: Moment) => {
-    setMoments((prev) => prev.map((m) => (m.id === updated.id ? updated : m)));
-  };
-
-  const handleHide = (moment: Moment) => {
-    setMoments((prev) => prev.filter((m) => m.id !== moment.id));
-  };
-
-  const handleCommentCountChange = (momentId: string, delta: number) => {
-    setMoments((prev) =>
-      prev.map((m) =>
-        m.id === momentId
-          ? { ...m, comment_count: Math.max(0, m.comment_count + delta) }
-          : m,
-      ),
-    );
-  };
-
   if (loading && moments.length === 0) {
     return (
       <div className="flex flex-col gap-4">
@@ -406,20 +344,11 @@ export function MomentsView() {
           description="When your friends share, they'll show up here."
         />
       ) : (
-        <div className="flex flex-col gap-3">
-          {moments.map((moment) => (
-            <MomentCard
-              key={moment.id}
-              moment={moment}
-              currentUserId={currentUserId}
-              onToggleLike={(m) => void handleToggleLike(m)}
-              onDelete={handleDelete}
-              onUpdate={handleUpdate}
-              onHide={handleHide}
-              onCommentCountChange={handleCommentCountChange}
-            />
-          ))}
-        </div>
+        <MomentStack
+          moments={moments}
+          setMoments={setMoments}
+          currentUserId={currentUserId}
+        />
       )}
 
       {nextCursor ? (

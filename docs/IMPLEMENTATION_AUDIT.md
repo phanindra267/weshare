@@ -1,6 +1,6 @@
 # WeShare — Implementation Audit
 Created: 2026-10-15
-Last updated: 2026-10-17
+Last updated: 2026-10-19
 
 This audit is the authoritative inventory of what currently exists in the
 repository. It is written after inspecting the codebase and is kept in sync as
@@ -37,13 +37,21 @@ phases land.
 | 1 | Authentication, Accounts, Profiles | Verified | `000002_users`..`000005_devices` |
 | 2 | Contacts and Presence | Verified | `000006_contacts` |
 | 3 | One-to-One Real-Time Messaging | Verified | `000007_messaging` |
-| 4 | Groups, Media, Voice | Verified | `000008_groups` |
-| 5 | Moments, Social, Discover | Verified | `000009_feed` |
+| 4 | Advanced Messaging | Not started | — (schema placeholders only: `edited_at`, `deleted_at`) |
+| 5 | Groups | Verified | `000008_groups` |
 | 6 | Media, Attachments, and Voice Messages | Verified | `000010_attachments` |
-| 7 | Moments and Social Feed | Verified | `000011_moments_features` |
+| 7 | Moments and Social Feed | Verified | `000009_feed`, `000011_moments_features` |
+| 8 | Discover and Global Search | Verified | — |
 | 9 | Audio and Video Calling | Verified | `000012_calls` |
+| 10 | Notifications and Synchronization | Verified | `000013_notifications` |
 
-There is no Phase 8 in the plan.
+**Numbering reconciliation (corrected 2026-10-19).** Earlier revisions of this
+audit used a drifted numbering: Phase 4 was "Groups, Media, Voice" and Phase 5
+"Moments, Social, Discover", duplicating Phases 6 and 7, and the file claimed
+"there is no Phase 8 in the plan". That was wrong. The master prompt is:
+4 = Advanced Messaging, 5 = Groups, 6 = Media, 7 = Moments, 8 = Discover and
+Global Search, 9 = Calling, 10 = Notifications (12 = mini-apps). **Phase 4 is the
+one unstarted phase below the current work.**
 
 ## Existing files (high level)
 
@@ -55,18 +63,25 @@ There is no Phase 8 in the plan.
 - `internal/auth/*`, `internal/users/*`, `internal/media/*`
 - `internal/contacts/*`
 - `internal/messaging/*`, `internal/realtime/*`
-- `internal/feed/*` (Moments: store, service, handler, DTOs, events, errors)
+- `internal/feed/*` (Moments: store, service, handler, DTOs, events, errors; also
+  owns post search and public-moment discover)
 - `internal/calls/*` (Calling: models, errors, events, store, service, DTOs,
   handler)
+- `internal/notifications/*` (Notifications: models, errors, events, store,
+  service, DTOs, handler)
+- `internal/search/*` (Global search: models, store, service, DTOs, handler;
+  owns `/search/*` and `/discover/people`)
 - `migrations/*.sql`, `migrations/migrations.go`
 
 ### Frontend
 - `src/app/*` (`/`, `/login`, `/register`, `/profile`, `/contacts`, `/messages`,
-  `/moments`), `globals.css`, layout
+  `/moments`, `/search`, `/discover`, `/notifications`), `globals.css`, layout
 - `src/lib/*` (api, env, cn, media), `src/types/*`
 - `src/components/ui/*`, `src/components/layout/*` (AppHeader, …)
 - `src/features/auth`, `features/contacts`, `features/presence`,
-  `features/messaging`, `features/moments`, `features/calls`
+  `features/messaging`, `features/moments`, `features/calls`,
+  `features/notifications`, `features/search`, `features/discover`,
+  `features/profile`
 - Configs: vitest.config.mts, vitest.setup.ts, playwright.config.ts,
   tsconfig.json, eslint.config.mjs, .prettierrc.json
 
@@ -76,25 +91,23 @@ There is no Phase 8 in the plan.
 
 ## Missing / planned (by phase)
 
-**Numbering reconciliation.** An earlier revision of this list numbered WebRTC
-calls "Phase 6" and notifications/search/sync "Phase 7". Those numbers were
-already spent by the time calling landed: Phase 6 is Media/Attachments/Voice and
-Phase 7 is Moments and Social Feed (both Verified, see the table above). Calling
-therefore shipped as **Phase 9**, and the remaining areas below are listed by
-name rather than by a number, so nothing has to be renumbered twice.
+**Numbering reconciliation.** This list now follows the master prompt (see the
+table above): 4 = Advanced Messaging, 5 = Groups, 6 = Media, 7 = Moments,
+8 = Discover and Global Search, 9 = Calling, 10 = Notifications, 12 = mini-apps.
+Phases 5–10 are Verified; Phase 4 is not started.
 
-- **Notifications, Search, Sync:** `notification.created` is reserved in the
-  WebSocket contract but not emitted; message/contact search; multi-page offline
-  sync catch-up (currently one 200-message page per reconnect).
-- **Chat power features:** message edit/delete/reply/forward/react/pin/search —
-  schema (`edited_at`, `deleted_at`) and contract placeholders exist, no write
-  path yet.
+- **Phase 4 — Advanced Messaging (next):** message edit/delete/reply/forward/
+  react/pin and in-chat search. Schema (`edited_at`, `deleted_at`) and contract
+  placeholders (`message.updated`, `message.deleted`) exist; no write path yet.
+- **Mini-apps (Phase 12):** including the discover mini-app directory and
+  mini-app search. `internal/miniapps` and `features/miniapps` are empty
+  scaffolding.
 - **Demo wallet.**
-- **Mini-apps.**
 - **Settings, privacy, accessibility.**
-- **Schema hardening and OpenAPI expansion:** the REST contract covers System,
-  Messaging, Media, Moments, and Calls; Auth, Users, and Contacts are still
-  undocumented there.
+- **Social surface** (`features/social` is empty scaffolding).
+- **Schema hardening and OpenAPI expansion:** the REST contract now covers
+  System, Messaging, Media, Moments, Search, Discover, Notifications, and Calls;
+  Auth, Users, and Contacts are still undocumented there.
 - **Security review.**
 - **Full E2E suite expansion.**
 - **Polish.**
@@ -102,9 +115,11 @@ name rather than by a number, so nothing has to be renumbered twice.
 - **Docs completion.**
 
 Cross-cutting gaps: no `users` package unit tests; message edit/delete write
-path not implemented; in-memory rate limiting (not distributed); single-page
-`sync` catch-up; group calls are a peer-to-peer mesh bounded by
-`CALL_MAX_PARTICIPANTS` with no SFU.
+path not implemented; notifications are best-effort over the socket (no
+APNs/FCM/email transport); search is substring-only with no ranking or
+full-text index; in-memory rate limiting (not distributed); single-page `sync`
+catch-up; group calls are a peer-to-peer mesh bounded by `CALL_MAX_PARTICIPANTS`
+with no SFU.
 
 ## Risks/notes
 
@@ -123,10 +138,10 @@ path not implemented; in-memory rate limiting (not distributed); single-page
 
 ## Conclusion
 
-Phases 0 (foundation) through 7 (Moments and Social Feed) plus 9 (Audio and
-Video Calling) are complete and verified — see `docs/PHASE_STATUS.md` for actual
-test results. All Go gates (build/vet/gofmt/test) and frontend gates
-(lint/typecheck/tests/build) pass, and the live browser E2E suites
-(`messaging`, `groups`, `moments`, `calls`) pass against a real API, database,
-and two real browser contexts. The ordered plan for the next phase lives in
-`docs/NEXT_STEPS.md`.
+Phases 0, and 1–3 plus 5–10 are complete and verified (Phase 4 — Advanced
+Messaging is the one unstarted phase below the frontier) — see
+`docs/PHASE_STATUS.md` for actual test results. All Go gates
+(build/vet/gofmt/test) and frontend gates (lint/typecheck/tests/build) pass, and
+the live browser E2E suites (`messaging`, `groups`, `moments`, `calls`) pass
+against a real API, database, and browser contexts. The ordered plan for the
+next phase lives in `docs/NEXT_STEPS.md`.

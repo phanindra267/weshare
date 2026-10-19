@@ -1,9 +1,9 @@
 # Phase Status
 
 **Project:** WeShare
-**Phase:** 9 — Audio and Video Calling
+**Phase:** 8 — Discover and Global Search
 **Status:** Verified
-**Last updated:** 2026-10-18
+**Last updated:** 2026-10-19
 
 ## Phase overview
 
@@ -13,18 +13,153 @@
 | 1 | Authentication, Accounts, and Profiles | Verified |
 | 2 | Contacts and Presence | Verified |
 | 3 | One-to-One Real-Time Messaging | Verified |
-| 4 | Groups, Media, Voice | Verified |
-| 5 | Moments, Social, Discover | Verified |
+| 4 | Advanced Messaging (edit, delete, reply, forward, react, pin, search) | Not started |
+| 5 | Groups | Verified |
 | 6 | Media, Attachments, and Voice Messages | Verified |
 | 7 | Moments and Social Feed | Verified |
+| 8 | Discover and Global Search | Verified |
 | 9 | Audio and Video Calling | Verified |
+| 10 | Notifications and Synchronization | Verified |
 
-The plan has no Phase 8; calling is numbered 9 in the master prompt. Earlier
-drafts of `docs/IMPLEMENTATION_AUDIT.md` and `docs/NEXT_STEPS.md` referred to it
-as "Phase 6 — WebRTC Calls"; that numbering is superseded (see the
-reconciliation note in `docs/IMPLEMENTATION_AUDIT.md`).
+### Numbering reconciliation
+
+Earlier revisions of this document used a drifted numbering: Phase 4 was
+labelled "Groups, Media, Voice" and Phase 5 "Moments, Social, Discover", which
+duplicated Phases 6 and 7 and left the file claiming **"the plan has no Phase
+8"**. That claim was wrong. This document now follows the master prompt:
+
+- **Phase 4 — Advanced Messaging** is the chat power-feature phase (edit,
+  delete, reply, forward, react, pin, in-chat search). It is **not implemented**
+  yet: the schema and contract placeholders (`edited_at`, `deleted_at`,
+  `message.updated`, `message.deleted`) exist, but there is no write path. This
+  is the one remaining gap below Phase 8.
+- **Phase 5 — Groups** is what the old "Phase 4 — Groups, Media, Voice" section
+  described. Media and voice messages belong to Phase 6.
+- **Phase 6 — Media, Attachments, and Voice Messages** (unchanged label).
+- **Phase 7 — Moments and Social Feed** absorbs the old "Phase 5 — Moments,
+  Social, Discover" section. Discover moved to its own Phase 8.
+- **Phase 8 — Discover and Global Search** is new (this document).
+- **Phase 9 — Audio and Video Calling** (unchanged label).
+- **Phase 10 — Notifications and Synchronization** is new (this document).
 
 Roadmap reference: `docs/IMPLEMENTATION_AUDIT.md` ("Missing / planned by phase").
+
+---
+
+## Phase 8 — Discover and Global Search
+
+### Acceptance criteria
+
+| Item | Status | Notes |
+|---|---|---|
+| Global search across posts | Completed | `GET /api/v1/search/posts` (owned by `internal/feed`, which owns moment visibility SQL). Substring match on the body with the same visibility predicate as the feed, so search can never leak a moment the feed would hide |
+| Global search across messages | Completed | `GET /api/v1/search/messages`; only messages in conversations the caller is a member of |
+| Global search across users/contacts | Completed | `GET /api/v1/search/users`; `is_contact` flags accepted contacts |
+| Global search across conversations | Completed | `GET /api/v1/search/conversations`; matches a direct peer's name/username or a group title. Optional `kind=group` narrows to groups |
+| Global search across groups | Completed | `GET /api/v1/search/groups` (alias for `conversations?kind=group`); returns groups the caller belongs to |
+| Discover people | Completed | `GET /api/v1/discover/people`; suggests accounts the caller is not connected to, newest first, excluding self |
+| Discover public moments | Completed | `GET /api/v1/discover/moments`; newest public moments across the app (`internal/feed`) |
+| Pagination | Completed | Every endpoint returns the standard `{items, next_cursor}` envelope; keyset cursors, clamped `limit` |
+| Authorization / permission scoping | Completed | Search never widens access: messages and groups are membership-scoped, posts obey moment visibility (`public`/`friends`/`private` + exclusions + blocks), user search never discloses contacts of others |
+| Validation | Completed | `q` required (≤ 100 runes); `kind` is a closed set; `cursor`/`limit` validated; failures return `422` with `{"fields": {...}}` |
+| Query escaping | Completed | `%`/`_`/`\` escaped in Go and matched with SQL `ESCAPE '\'`, so a query cannot become a wildcard |
+| Frontend: `/discover` | Completed | Discover landing page with a search shortcut, "People you may know" (with add-friend), and a public-moments feed with load-more |
+| Frontend: `/search` | Completed | One query box with an **All** tab that queries every domain at once plus **Messages / People / Chats / Posts** tabs, debounced, with load-more, loading/empty/error states |
+| Frontend navigation | Completed | `Discover` link in `AppHeader`; `/discover` gated by `RequireAuth` |
+| Realtime | Completed | Search and discover are read-only; no new WebSocket events |
+| Contracts | Completed | `openapi.yaml` gains the `Search`/`Discover` tags, paths, and schemas (`ProfileHit`, `MessageSearchHit`, `ConversationHit`, `SearchConversation`, `SearchPeer`) |
+
+### Design notes
+
+- **Ownership.** Moment search lives in `internal/feed` (which owns the moment
+  visibility SQL) and is mounted at `/search/posts` and `/discover/moments`; it
+  does **not** live under `/moments/:id`, so there is no static/parameter route
+  clash. Everything else lives in `internal/search` (`/search/*` and
+  `/discover/people`).
+- **One visibility predicate.** `feed.momentVisibilityPredicate` is a single SQL
+  fragment used by `ListFeed`, `GetMoment`, `SearchMoments`, and
+  `ListPublicMoments`, so search and feed can never drift apart.
+- **Public discover.** `ListPublicMoments` filters to `visibility = 'public'`
+  and still applies block filters, so a public moment from a blocked author is
+  hidden.
+- **Cursors.** People and conversation results order by `created_at DESC, id
+  DESC` with a `<unix-micro>:<uuid>` keyset cursor (the same encoding the feed
+  and conversation lists use).
+- **No ranking.** Matching is `ILIKE` substring search (no full-text or
+  relevance ranking); results are newest-first. This is documented rather than
+  faked.
+- **Mini-apps.** The master prompt lists a mini-app directory and mini-app search
+  under discover; mini-apps are **Phase 12** and the `internal/miniapps` and
+  `features/miniapps` directories are empty scaffolding. The directory is
+  therefore deferred to Phase 12 rather than shipped as a dead end here.
+
+### Test results (actual, not aspirational)
+
+**Go backend** (`services/api`):
+- `go build ./...` → exit 0
+- `go vet ./...` → exit 0
+- `gofmt -l .` → clean
+- `go test ./...` → pass in every package, including `feed` and `search`
+- `internal/feed` tests cover `SearchPosts` (required query, over-length query,
+  LIKE-metacharacter escaping, pagination). `internal/search` tests cover
+  `Conversations` (rejects an unknown `kind`, escapes metacharacters, paginates)
+  and `DiscoverPeople` (does not share the query with other domains). New
+  route-mount tests (`handler_test.go`) assert `/search/posts`,
+  `/discover/moments`, `/search/*`, and `/discover/people` resolve to the auth
+  guard (401) rather than 404, alongside the existing `/moments/:id` route.
+
+**Frontend** (`apps/web`):
+- `npm run lint` → exit 0
+- `npm run typecheck` → exit 0
+- `npm test` → 61/61 passed across 13 files (adds `SearchView` and
+  `DiscoverView` suites)
+- `npm run build` → succeeds; routes include `/discover`
+
+**Integration (live)** — `phase8_live.ps1`, all checks pass:
+- As an author: message search finds direct **and** group messages; user search
+  marks a contact; conversation search finds a direct chat by peer name; group
+  search finds the group by title and returns `kind: "group"` with the right
+  `member_count`; post search finds both the public and friends-only moments;
+  `limit=1` returns exactly one item **and** a `next_cursor`.
+- As a stranger: message search returns 0 (membership-scoped); group search
+  returns 0 (not a member); post search returns **only** the public moment;
+  `discover/people` includes the author, excludes self; `discover/moments`
+  returns only `public` moments and excludes the friends-only one.
+- Validation: an unknown `kind` and an empty `q` both return `422`; an
+  unauthenticated request returns `401`.
+
+---
+
+## Phase 10 — Notifications and Synchronization
+
+### Acceptance criteria
+
+| Item | Status | Notes |
+|---|---|---|
+| Persisted notifications | Completed | Migration `000013_notifications`: per-user rows with cascading optional FKs (conversation/message/moment/call), a `data` JSONB payload, `read_at`, a `(user_id, created_at DESC, id DESC)` listing index, and a partial unread index |
+| Notification triggers | Completed | `contact_request` and `contact_accepted` (contacts), `moment_like` and `moment_comment` (feed), `missed_call` (calls) — each emitted through the notifications service |
+| REST surface | Completed | `GET /api/v1/notifications`, `GET /api/v1/notifications/unread-count`, `POST /api/v1/notifications/read`, `DELETE /api/v1/notifications/:id`, `DELETE /api/v1/notifications` |
+| Realtime delivery | Completed | `notification.created` is published to the recipient's socket over the existing hub (best-effort); persistence makes the history authoritative for offline clients |
+| Authorization | Completed | Notifications are strictly per-user; marking or deleting another user's notification yields `404` |
+| Frontend | Completed | `NotificationBell` (unread badge) in `AppHeader`, `/notifications` page (list, mark read, delete one, clear all), and `NotificationsProvider` (loads on connect/reconnect, live-prepends on `notification.created`, exposes an empty state to signed-out visitors) |
+| Loading / empty / error states | Completed | Skeletons, empty states, and retryable errors on the notifications list |
+| Contracts | Completed | `openapi.yaml` gains the `Notifications` tag/paths/schemas; `websocket-events.md` moves `notification.created` to **Implemented** and documents the payload |
+
+### Design notes
+
+- A notification is a durable record; the socket frame is an optimization, not
+  the source of truth. A client that was offline simply lists what it missed.
+- `data` (JSONB) carries a small denormalised payload (for example a text
+  preview) so a row renders without extra reads.
+- The unread count is a partial-index count (`WHERE read_at IS NULL`).
+
+### Test results
+
+- `go test ./...` including `internal/notifications` and the trigger tests in
+  `contacts`, `feed`, and `calls` (`notify_test.go`) → pass.
+- Live (`phase10_live.ps1`): request/accepted/like/comment notifications are
+  created for the right recipient, the unread count moves, mark-read clears it,
+  and deleting a notification twice returns `404` the second time.
 
 ---
 
@@ -45,6 +180,7 @@ Roadmap reference: `docs/IMPLEMENTATION_AUDIT.md` ("Missing / planned by phase")
 | Contacts-only calling | Completed | `Store.AreConnected` (accepted contact, no block either way) is checked for every callee before a call is created; otherwise `FORBIDDEN` |
 | Call history persistence | Completed | Migration `000012_calls` (`calls`, `call_participants`); `GET /api/v1/calls` returns the caller's history newest first |
 | ICE bootstrap | Completed | `GET /api/v1/calls/ice` returns `ICE_SERVERS` plus the `CALL_MAX_PARTICIPANTS` ceiling |
+| Missed-call notifications | Completed | An unanswered call records a `missed_call` notification for the callee (Phase 10) |
 | Disconnect cleanup | Completed | Losing the last socket drops the user from any active call, so an abandoned tab cannot leave a call ringing |
 | Entry points | Completed | Call and video-call buttons per contact row, and call buttons in the direct-conversation thread header |
 | Loading, empty, and error states | Completed | Call buttons hide unless a `CallProvider` is mounted and no call is in progress; `getUserMedia` failure declines the call instead of hanging |
@@ -88,66 +224,29 @@ built on. This is documented in `websocket-events.md` and
 
 | Item | Status | Notes |
 |---|---|---|
-| Create text and media posts | Completed | Create moments with up to 9 photos/videos and text body up to 2000 characters |
+| Schema: moments, media, likes, comments | Completed | Migration `000009_feed` (schema at v9); `moment_media`, `moment_likes`, `moment_comments` cascade with their moment |
+| Create text and media posts | Completed | Create moments with up to 9 photos/videos and a text body up to 2000 characters |
 | Edit and delete your own posts | Completed | Inline editing with `PATCH /api/v1/moments/:id` and author soft deletion via `DELETE /api/v1/moments/:id` |
 | Display authors, timestamps, and media previews | Completed | Author display name, avatar, relative timestamp, photo grid, and `<video controls>` |
-| Implement feed pagination | Completed | Keyset cursor-based pagination (`cursor` & `limit`) with next-page detection |
-| Like and unlike posts | Completed | Idempotent reactions with `POST/DELETE /api/v1/moments/:id/likes` returning updated count |
-| Comment on posts | Completed | Expandable comment thread with `POST /api/v1/moments/:id/comments` |
-| Reply to comments | Completed | Threaded replies supporting `reply_to_id` and joined `reply_to_author` profile |
-| Delete permitted comments | Completed | Both comment author and moment author are authorized to soft-delete comments |
-| Prevent duplicate likes and requests | Completed | Unique constraints on database and idempotent toggle handlers prevent duplicates |
-| Implement public and contacts-only visibility | Completed | `friends` (default), `public`, and `private` visibilities strictly enforced in SQL queries |
-| Implement restricted audiences or excluded-user lists | Completed | `moment_exclusions` table and API support to exclude specific contacts from viewing moments |
-| Enforce visibility and blocking rules on backend | Completed | Bidirectional contact blocking filter in SQL prevents blocked users from seeing or interacting with posts |
-| Hide or report posts | Completed | `POST /api/v1/moments/:id/hide` filters post from viewer's feed; `POST /api/v1/moments/:id/report` persists report |
-| Add relevant loading, empty, and error states | Completed | Feed skeleton loaders, EmptyState components, ErrorMessage with retry, loading buttons, and toast notifications |
-| Persist posts, comments, likes, and media associations | Completed | PostgreSQL migration `000011_moments_features` adds exclusions, hidden posts, reports, and replies |
-
----
-
-## Phase 6 — Media, Attachments, and Voice Messages
-
-### Acceptance criteria
-
-| Item | Status | Notes |
-|---|---|---|
-| Upload and share images | Completed | Supported via `POST /api/v1/media/attachments`; sniffed and validated |
-| Upload and share videos | Completed | Full `video/mp4`, `video/webm`, `video/quicktime` classification, preview with `<video controls>`, and download |
-| Upload and download ordinary files | Completed | Stored safely with sanitized extensions; served with Content-Disposition headers |
-| Record and play voice messages | Completed | In-browser MediaRecorder recording + playback via HTML5 `<audio controls>` |
-| Display audio controls and media previews | Completed | Dedicated video player, audio player with duration, image loading skeletons |
-| Show upload progress and errors | Completed | Real-time `UploadProgress` progress bar via XHR progress events; toast notifications on failure |
-| Validate file size, file type, and content | Completed | Client-side 50MB check + server-side bounded MaxBytesReader and content sniffing |
-| Store media metadata in PostgreSQL | Completed | Migration `000010_attachments` creates `message_attachments` with ownership & conversation linkage |
-| Store media bytes outside PostgreSQL | Completed | Rooted filesystem storage with subdirectories for `attachments` and `avatars` |
-| Implement authorization for private attachments | Completed | `CanAccess` verifies membership in conversation or uploader identity; `403` on unauthorized access |
-| Prevent path traversal and arbitrary file access | Completed | Regexp validation, path cleaning, and prefix checking prevent escaping storage root |
-| Add attachment ownership and message associations | Completed | Foreign keys to `users(id)`, `messages(id)`, and `conversations(id)`; uploader-only delete |
-| Handle abandoned uploads and temporary files | Completed | Background goroutine sweeper periodically purges orphaned pending attachments older than 24h |
-| Preserve uploaded media across restarts | Completed | Persistent disk storage decoupled from application process lifecycle |
-
----
-
-## Phase 5 — Moments, Social, Discover
-
-### Acceptance criteria
-
-| Item | Status | Notes |
-|---|---|---|
-| Schema: moments, media, likes, comments | Completed | Migration `000009_feed` (schema at v9); `moment_media`, `moment_likes`, `moment_comments` cascade with their moment |
-| Visibility model | Completed | `friends` (default), `public`, `private`; enforced in SQL for both feed and single-moment reads |
+| Visibility model | Completed | `friends` (default), `public`, `private`; enforced in a single SQL predicate for feed, single-moment reads, post search, and public discover |
 | REST surface | Completed | `GET/POST /api/v1/moments`, `GET/DELETE /api/v1/moments/:id`, `POST/DELETE /api/v1/moments/:id/likes`, `GET/POST /api/v1/moments/:id/comments`, `DELETE /api/v1/moments/:id/comments/:commentId` |
-| Feed ordering + pagination | Completed | Newest first; opaque keyset `cursor` + `limit`; `next_cursor` empty on last page |
-| Comments | Completed | Oldest first with keyset pagination; author or moment owner may delete |
-| Likes | Completed | Idempotent like/unlike; returns `{like_count, liked}`; denied on hidden moments |
-| Media | Completed | Reuses `POST /api/v1/media/attachments`; image/video only (other types rejected); max 9 per moment |
-| Realtime fan-out | Completed | `moment.created` published to the author's accepted contacts for `friends` visibility; not broadcast for `private`; `public` reachable via the feed only |
+| Feed ordering + pagination | Completed | Newest first; opaque keyset `cursor` + `limit`; `next_cursor` empty on the last page |
+| Like and unlike posts | Completed | Idempotent reactions with `POST/DELETE /api/v1/moments/:id/likes` returning the updated count |
+| Comment on posts and reply | Completed | Expandable comment thread; threaded replies supporting `reply_to_id` with a joined `reply_to_author` profile |
+| Delete permitted comments | Completed | Both the comment author and the moment author may soft-delete comments |
+| Prevent duplicate likes and requests | Completed | Unique constraints plus idempotent toggle handlers prevent duplicates |
+| Restricted audiences / excluded users | Completed | `moment_exclusions` table and API support to exclude specific contacts from viewing a moment |
+| Enforce visibility and blocking on the backend | Completed | Bidirectional contact-blocking filter in SQL prevents blocked users from seeing or interacting with posts |
+| Post notifications | Completed | Likes and comments create `moment_like` / `moment_comment` notifications for the author (Phase 10) |
+| Hide or report posts | Completed | `POST /api/v1/moments/:id/hide` filters a post from the viewer's feed; `POST /api/v1/moments/:id/report` persists a report |
+| Loading, empty, and error states | Completed | Feed skeleton loaders, `EmptyState`, `ErrorMessage` with retry, loading buttons, and toasts |
+| Persist posts, comments, likes, media | Completed | Migration `000011_moments_features` adds exclusions, hidden posts, reports, and replies |
+| Realtime fan-out | Completed | `moment.created` published to the author's accepted contacts for `friends` visibility; not broadcast for `private`; `public` reachable via the feed/discover only |
 | Validation | Completed | Body ≤ 2000 runes; a moment needs text or media; visibility is a closed set; comment ≤ 1000 chars |
 | Authorization | Completed | Non-viewers get `404` (not `403`) so hidden moments are not disclosed; only the author may delete their moment |
-| Frontend: `/moments` | Completed | Composer (text, visibility, up to 9 photos/videos), feed cards with media, optimistic like/unlike, expandable comments (load/add/delete, load-more), author delete, live prepend on `moment.created` |
+| Frontend: `/moments` | Completed | Composer (text, visibility, up to 9 photos/videos), feed cards with media, optimistic like/unlike, expandable comments, author delete, live prepend on `moment.created` |
 | Nav + route gating | Completed | Moments link in `AppHeader`; `/moments` gated by `RequireAuth` |
-| Contracts | Completed | `openapi.yaml` (Moments tag + paths + `Moment`/`Comment`/`MomentPage`/`CommentPage`/`LikeState` schemas) and `websocket-events.md` (`moment.created`) |
+| Contracts | Completed | `openapi.yaml` (Moments tag + paths + `Moment`/`Comment`/`MomentPage`/`CommentPage`/`LikeState`) and `websocket-events.md` (`moment.created`) |
 
 ### Design notes
 
@@ -163,38 +262,40 @@ built on. This is documented in `websocket-events.md` and
 
 ### Test results (actual, not aspirational)
 
-**Go backend** (`services/api`):
-- `go build ./...` → exit 0
-- `go vet ./...` → exit 0
-- `gofmt -l .` → clean
-- `go test ./...` → pass in 11 packages: `auth`, `config`, `contacts`,
-  `database`, `feed`, `health`, `http`, `httpx`, `media`, `messaging`,
-  `middleware`
-- `go test ./internal/feed -v` → 24 passed, 0 failed (create/fan-out, visibility
-  authorization, like/unlike idempotency and counts, comment rules and
-  ownership, pagination cursors, validation and media-type rejection)
-- Migrations: applied `[1..9]`, pending `[]`
-
-**Frontend** (`apps/web`):
-- `npm run lint` → exit 0
-- `npm run typecheck` → exit 0
-- `npm test` → 39/39 passed across 9 files (`Button`, `LoginForm`,
-  `ContactsView`, `ConversationsView`, `ConversationsView.groups`,
-  `MomentsView`, `realtime`, `thread`, `api`)
-- `npm run build` → succeeds; routes include `/moments`
-- `npm run e2e` (Playwright, Chromium) → 3/3 passed
-
-**Integration (live):**
-- Browser E2E (`apps/web/e2e/moments.spec.ts`) → **1 passed**: two users become
-  contacts, Alice shares a friends-only moment, Bob sees it in his feed, likes it
-  (optimistic toggle to `Unlike`), comments, and Alice sees the comment after
-  reloading and opening the thread.
-- Regression: `e2e/messaging.spec.ts` and `e2e/groups.spec.ts` still pass
-  (Phase 3 and Phase 4 unaffected by the Phase 5 changes).
+- `go test ./internal/feed -v` → create/fan-out, visibility authorization,
+  like/unlike idempotency and counts, comment rules and ownership, pagination
+  cursors, validation and media-type rejection → pass.
+- Frontend: `MomentsView` suite passes; `npm run build` includes `/moments`.
+- Integration (live): `e2e/moments.spec.ts` → two users become contacts, Alice
+  shares a friends-only moment, Bob sees it, likes it, comments, and Alice sees
+  the comment after reloading.
 
 ---
 
-## Phase 4 — Groups, Media, Voice
+## Phase 6 — Media, Attachments, and Voice Messages
+
+### Acceptance criteria
+
+| Item | Status | Notes |
+|---|---|---|
+| Upload and share images | Completed | `POST /api/v1/media/attachments`; sniffed and validated |
+| Upload and share videos | Completed | `video/mp4`, `video/webm`, `video/quicktime` classification, `<video controls>` preview, and download |
+| Upload and download ordinary files | Completed | Stored safely with sanitized extensions; served with `Content-Disposition` headers |
+| Record and play voice messages | Completed | In-browser `MediaRecorder` recording + HTML5 `<audio controls>` playback |
+| Display audio controls and media previews | Completed | Dedicated video player, audio player with duration, image loading skeletons |
+| Show upload progress and errors | Completed | Real-time `UploadProgress` bar via XHR progress events; toasts on failure |
+| Validate file size, file type, and content | Completed | Client-side 50 MB check + server-side bounded `MaxBytesReader` and content sniffing |
+| Store media metadata in PostgreSQL | Completed | Migration `000010_attachments` creates `message_attachments` with ownership & conversation linkage |
+| Store media bytes outside PostgreSQL | Completed | Rooted filesystem storage with subdirectories for `attachments` and `avatars` |
+| Authorization for private attachments | Completed | `CanAccess` verifies conversation membership or uploader identity; `403` on unauthorized access |
+| Prevent path traversal and arbitrary file access | Completed | Regexp validation, path cleaning, and prefix checking prevent escaping the storage root |
+| Attachment ownership and message associations | Completed | Foreign keys to `users(id)`, `messages(id)`, `conversations(id)`; uploader-only delete |
+| Handle abandoned uploads / temporary files | Completed | Background sweeper periodically purges orphaned pending attachments older than 24 h |
+| Preserve uploaded media across restarts | Completed | Persistent disk storage decoupled from the process lifecycle |
+
+---
+
+## Phase 5 — Groups
 
 ### Acceptance criteria
 
@@ -207,16 +308,16 @@ built on. This is documented in `websocket-events.md` and
 | Media messages | Completed | Reuses `POST /api/v1/media/attachments`; `image`/`file`/`audio` messages render in the thread |
 | Realtime events | Completed | `conversation.updated` and `member.changed` published to current members (a departing user also receives their own `member.changed`) |
 | Multi-member read/delivery | Completed | Per-member `last_delivered_sequence`/`last_read_sequence` hold for groups; unread counts and receipts verified |
-| Frontend | Completed | `CreateGroupDialog`, `MemberPicker`, `GroupInfoDialog`; group list/thread, member management, system messages, media attachments in the composer and list |
+| Group search | Completed | `GET /api/v1/search/groups` finds groups by title for the caller's own groups (Phase 8) |
+| Frontend | Completed | `CreateGroupDialog`, `MemberPicker`, `GroupInfoDialog`; group list/thread, member management, system messages, media attachments |
 | Tests | Completed | `internal/messaging` service tests cover group create/add/remove/leave/role and fan-out; `ConversationsView.groups.test.tsx` + `e2e/groups.spec.ts` |
 
 ### Test results
 
-- `go test ./internal/messaging` → pass (group lifecycle, system messages,
-  authorization, fan-out assertions).
-- Browser E2E (`apps/web/e2e/groups.spec.ts`) → **1 passed**: three users form a
-  group, an image is shared live to another member, the member sees the group
-  panel without admin tools, and a non-member receives `404` reading the group's
+- `go test ./internal/messaging` → pass.
+- Browser E2E (`apps/web/e2e/groups.spec.ts`) → pass: three users form a group,
+  an image is shared live to another member, the member sees the group panel
+  without admin tools, and a non-member receives `404` reading the group's
   history.
 
 ---
@@ -238,9 +339,10 @@ built on. This is documented in `websocket-events.md` and
 | WebSocket transport | Completed | `GET /api/v1/realtime` (auth at handshake, origin allow-list); ping/pong keepalive, reconnect-safe |
 | Realtime events | Completed | Server: `hello`, `pong`, `message.created`, `message.ack`, `message.receipt`, `typing`, `sync.result`, `read.ack`, `presence`, `error`; client: `ping`, `message.send`, `typing`, `read`, `sync` |
 | Presence fan-out | Completed | Connect/disconnect broadcast `presence` to accepted friends and seed the connecting user with online friends |
-| Rate limiting | Completed | Message send `30/min` per user; contact requests `30/15min` per IP; registration `10/hr` per IP (env-configurable) |
+| Rate limiting | Completed | Message send `30/min` per user; contact requests `30/15 min` per IP; registration `10/hr` per IP (env-configurable) |
 | Frontend: conversations + thread | Completed | `/messages` with list + thread, optimistic send + retry, history paging, unread badges, typing, read receipts, presence |
 | Frontend: realtime client | Completed | Reconnecting `RealtimeClient` (exponential backoff), `RealtimeProvider` context, `sync` catch-up on reconnect |
+| Message search | Completed | `GET /api/v1/search/messages` (Phase 8) |
 | Contracts | Completed | `openapi.yaml` (Messaging tag + schemas) and `websocket-events.md` |
 
 ### Design notes
@@ -257,10 +359,10 @@ built on. This is documented in `websocket-events.md` and
 ### Test results
 
 - `go test ./internal/messaging` → pass.
-- Browser E2E (`apps/web/e2e/messaging.spec.ts`) → **1 passed**: two users
-  register, become contacts, open a chat, presence shows online, Alice sends, Bob
-  sees it, Bob replies and Alice receives it live over the WebSocket, and the
-  read receipt flips Alice's tick to Read.
+- Browser E2E (`apps/web/e2e/messaging.spec.ts`) → pass: two users register,
+  become contacts, open a chat, presence shows online, Alice sends, Bob sees it,
+  Bob replies and Alice receives it live over the WebSocket, and the read receipt
+  flips Alice's tick to Read.
 
 ---
 
@@ -272,16 +374,15 @@ built on. This is documented in `websocket-events.md` and
 |---|---|---|
 | Schema: contacts + friend requests | Completed | Migration `000006_contacts` |
 | Contact CRUD + requests | Completed | `GET/POST/DELETE /api/v1/contacts`, `GET /api/v1/contacts/requests`, `POST /api/v1/contacts/requests/:id/{accept,decline}`, `POST /api/v1/users/:id/block` (+ unblock) |
-| Presence heartbeat | Completed | `POST /api/v1/presence/heartbeat`; `online` derived from `PRESENCE_STALE_AFTER` (default 60s) |
-| Rate limiting | Completed | Contact requests `30/15min` per IP |
-| Frontend | Completed | `features/contacts` + `features/presence`; `/contacts` route gated by `RequireAuth`; presence badges; heartbeat every 30s |
+| Presence heartbeat | Completed | `POST /api/v1/presence/heartbeat`; `online` derived from `PRESENCE_STALE_AFTER` (default 60 s) |
+| Rate limiting | Completed | Contact requests `30/15 min` per IP |
+| Notifications | Completed | Requests and acceptances create `contact_request` / `contact_accepted` notifications (Phase 10) |
+| Frontend | Completed | `features/contacts` + `features/presence`; `/contacts` gated by `RequireAuth`; presence badges; heartbeat every 30 s |
 | Mutual connections | Completed | Accepting stores the friendship bidirectionally; single-direction lookup is complete |
 
 ### Test results
 
 - `go test ./internal/contacts` → pass; `ContactsView.test.tsx` covers the UI.
-- Live harness `weshare-e2e-contacts.ps1` → **38 passed, 0 failed** (recorded
-  with the Phase 2 commit).
 
 ---
 
@@ -289,12 +390,12 @@ built on. This is documented in `websocket-events.md` and
 
 | Item | Status | Notes |
 |---|---|---|
-| Auth schema (users, credentials, sessions) | Completed | `000002_users`, `000003_auth`, `000004_sessions`, `000005_devices` |
+| Auth schema (users, credentials, sessions) | Completed | `000002_users`, `000003_credentials`, `000004_sessions`, `000005_devices` |
 | Password hashing (Argon2id) | Completed | `alexedwards/argon2id`; Memory 64 MiB / Parallelism NumCPU / 32-byte key |
 | Sessions: opaque token, DB-backed | Completed | 256-bit token; only SHA-256 hex stored in `sessions.token_hash` |
 | Secure cookies | Completed | HTTP-only `weshare_session`; SameSite=Lax (default); Secure in prod |
 | CSRF (double-submit cookie) | Completed | `weshare_csrf` echoed as `X-CSRF-Token`; enforced for unsafe methods with a session |
-| Rate limiting + login lockout | Completed | Per-IP: login 30/15min, register 10/hr, password 10/hr; lockout after `MAX_LOGIN_ATTEMPTS` |
+| Rate limiting + login lockout | Completed | Per-IP: login 30/15 min, register 10/hr, password 10/hr; lockout after `MAX_LOGIN_ATTEMPTS` |
 | Registration / login / logout / me | Completed | `POST /api/v1/auth/{register,login,logout}`, `GET /api/v1/auth/me` |
 | Change password + session revocation | Completed | `POST /api/v1/auth/password`; `GET`/`DELETE /api/v1/auth/sessions[/:id]` |
 | Profiles (read/update/avatar) | Completed | `GET`/`PATCH /api/v1/me`, `POST /api/v1/me/avatar`, `GET /api/v1/users/:id` |
@@ -305,20 +406,30 @@ built on. This is documented in `websocket-events.md` and
 
 ## Known gaps
 
+- **Phase 4 — Advanced Messaging** is not implemented: message edit/delete have
+  schema (`edited_at`, `deleted_at`) and contract (`message.updated`,
+  `message.deleted`) placeholders but no write path; reply/forward/react/pin and
+  in-chat search are also outstanding.
+- **Mini-apps (Phase 12)**, the **demo wallet**, **settings/privacy/accessibility**,
+  and the **social** surface are not implemented; the corresponding feature
+  directories are empty scaffolding.
 - `users` package has no unit tests (covered indirectly by live E2E checks).
-- Message editing/deletion have schema and contract placeholders (`edited_at`,
-  `deleted_at`, `message.updated`/`message.deleted` events) but no write path;
-  schedule with the relevant phase.
-- Moments likes and comments do not emit realtime events; clients refresh counts
-  on demand (documented in `websocket-events.md`).
-- WebRTC call signalling (`call.*` events) and notifications are **Planned**
-  (Phases 6–7) and not implemented.
-- Rate limiting is in-memory per IP/user (dev-only; not distributed).
+- Search matching is substring `ILIKE` with no ranking or full-text index; fine
+  at current scale, and it does not scale to large corpora without one.
+- `openapi.yaml` still does not document the Auth, Users, or Contacts surfaces
+  (System, Messaging, Media, Moments, Search, Discover, Notifications, and Calls
+  are covered).
+- Notifications are delivered over the live socket best-effort; there is no push
+  (APNs/FCM) or email transport.
 - `sync.result` catches up one page (200) at a time; repeated `sync` is required
   for very large backlogs.
+- Rate limiting is in-memory per IP/user (dev-only; not distributed).
+- Group calls are a peer-to-peer mesh bounded by `CALL_MAX_PARTICIPANTS`; no SFU.
 - Transitive dev-only npm advisory (braces/micromatch) noted; not runtime.
 
 ## Next action
 
-Proceed to **Phase 6 — WebRTC Calls**. Read `docs/NEXT_STEPS.md` for the ordered
-plan. Keep `PHASE_STATUS.md`/`NEXT_STEPS.md` in sync as work lands.
+**Phase 4 — Advanced Messaging** (edit, delete, reply, forward, react, pin,
+in-chat search) is the next unstarted phase below the current one. Read
+`docs/NEXT_STEPS.md` for the ordered plan. Keep `PHASE_STATUS.md` /
+`NEXT_STEPS.md` in sync as work lands.

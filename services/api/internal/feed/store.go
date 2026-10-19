@@ -122,29 +122,7 @@ func (st *Store) GetMoment(ctx context.Context, viewer, id uuid.UUID) (Moment, e
 	m, err := scanMoment(st.db.Pool.QueryRow(ctx,
 		momentColumns+`
 		WHERE m.id = $2 AND m.deleted_at IS NULL
-		  AND (
-		    m.author_id = $1
-		    OR m.visibility = '`+VisibilityPublic+`'
-		    OR (m.visibility = '`+VisibilityFriends+`' AND EXISTS (
-		         SELECT 1 FROM contacts c
-		         WHERE c.user_id = $1
-		           AND c.contact_id = m.author_id
-		           AND c.status = 'accepted'))
-		  )
-		  AND NOT EXISTS (
-		    SELECT 1 FROM moment_exclusions ex
-		    WHERE ex.moment_id = m.id AND ex.user_id = $1
-		  )
-		  AND NOT EXISTS (
-		    SELECT 1 FROM contacts bl
-		    WHERE bl.status = 'blocked'
-		      AND ((bl.user_id = $1 AND bl.contact_id = m.author_id)
-		        OR (bl.user_id = m.author_id AND bl.contact_id = $1))
-		  )
-		  AND NOT EXISTS (
-		    SELECT 1 FROM moment_hidden h
-		    WHERE h.user_id = $1 AND h.moment_id = m.id
-		  )`, viewer, id))
+		  AND`+momentVisibilityPredicate, viewer, id))
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Moment{}, ErrMomentNotFound
 	}
@@ -190,29 +168,7 @@ func (st *Store) loadMedia(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]
 func (st *Store) ListFeed(ctx context.Context, viewer uuid.UUID, afterCreated *time.Time, afterID *uuid.UUID, limit int) ([]Moment, error) {
 	rows, err := st.db.Pool.Query(ctx, momentColumns+`
 		WHERE m.deleted_at IS NULL
-		  AND (
-		    m.author_id = $1
-		    OR m.visibility = '`+VisibilityPublic+`'
-		    OR (m.visibility = '`+VisibilityFriends+`' AND EXISTS (
-		         SELECT 1 FROM contacts c
-		         WHERE c.user_id = $1
-		           AND c.contact_id = m.author_id
-		           AND c.status = 'accepted'))
-		  )
-		  AND NOT EXISTS (
-		    SELECT 1 FROM moment_exclusions ex
-		    WHERE ex.moment_id = m.id AND ex.user_id = $1
-		  )
-		  AND NOT EXISTS (
-		    SELECT 1 FROM contacts bl
-		    WHERE bl.status = 'blocked'
-		      AND ((bl.user_id = $1 AND bl.contact_id = m.author_id)
-		        OR (bl.user_id = m.author_id AND bl.contact_id = $1))
-		  )
-		  AND NOT EXISTS (
-		    SELECT 1 FROM moment_hidden h
-		    WHERE h.user_id = $1 AND h.moment_id = m.id
-		  )
+		  AND`+momentVisibilityPredicate+`
 		  AND ($2::timestamptz IS NULL
 		       OR (m.created_at, m.id) < ($2::timestamptz, $3::uuid))
 		ORDER BY m.created_at DESC, m.id DESC
@@ -245,6 +201,105 @@ func (st *Store) ListFeed(ctx context.Context, viewer uuid.UUID, afterCreated *t
 		moments[i].Media = media[moments[i].ID]
 	}
 	return moments, nil
+}
+
+// momentVisibilityPredicate is the SQL that decides whether `viewer` ($1) may
+// see a moment whose author is `m.author_id`. It is shared by the feed, single
+// reads, and search so visibility can never drift between them: a moment is
+// visible to its author, to anyone when public, and to accepted contacts when
+// friends-only. Exclusions, blocks in either direction, and hidden posts are
+// filtered out. Callers must append it to a WHERE clause that already has $1
+// bound to the viewer.
+const momentVisibilityPredicate = `
+	  (
+	    m.author_id = $1
+	    OR m.visibility = '` + VisibilityPublic + `'
+	    OR (m.visibility = '` + VisibilityFriends + `' AND EXISTS (
+	         SELECT 1 FROM contacts c
+	         WHERE c.user_id = $1
+	           AND c.contact_id = m.author_id
+	           AND c.status = 'accepted'))
+	  )
+	  AND NOT EXISTS (
+	    SELECT 1 FROM moment_exclusions ex
+	    WHERE ex.moment_id = m.id AND ex.user_id = $1
+	  )
+	  AND NOT EXISTS (
+	    SELECT 1 FROM contacts bl
+	    WHERE bl.status = 'blocked'
+	      AND ((bl.user_id = $1 AND bl.contact_id = m.author_id)
+	        OR (bl.user_id = m.author_id AND bl.contact_id = $1))
+	  )
+	  AND NOT EXISTS (
+	    SELECT 1 FROM moment_hidden h
+	    WHERE h.user_id = $1 AND h.moment_id = m.id
+	  )`
+
+// scanMomentRows drains a moments result set and attaches media in one batch.
+func (st *Store) scanMomentRows(ctx context.Context, rows pgx.Rows, limit int) ([]Moment, error) {
+	moments := make([]Moment, 0, limit)
+	ids := make([]uuid.UUID, 0, limit)
+	for rows.Next() {
+		m, err := scanMoment(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan moment: %w", err)
+		}
+		moments = append(moments, m)
+		ids = append(ids, m.ID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate moments: %w", err)
+	}
+	media, err := st.loadMedia(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	for i := range moments {
+		moments[i].Media = media[moments[i].ID]
+	}
+	return moments, nil
+}
+
+// SearchMoments returns one page of moments visible to the viewer whose body
+// matches query (case-insensitive substring), newest first. Visibility,
+// exclusions, blocking, and hidden posts are enforced in SQL, so a moment the
+// viewer may not see is never returned.
+func (st *Store) SearchMoments(ctx context.Context, viewer uuid.UUID, query string, afterCreated *time.Time, afterID *uuid.UUID, limit int) ([]Moment, error) {
+	rows, err := st.db.Pool.Query(ctx, momentColumns+`
+		WHERE m.deleted_at IS NULL
+		  AND m.body <> ''
+		  AND m.body ILIKE '%' || $2 || '%' ESCAPE '\'
+		  AND`+momentVisibilityPredicate+`
+		  AND ($3::timestamptz IS NULL
+		       OR (m.created_at, m.id) < ($3::timestamptz, $4::uuid))
+		ORDER BY m.created_at DESC, m.id DESC
+		LIMIT $5`,
+		viewer, query, nullableTime(afterCreated), nullableUUID(afterID), limit)
+	if err != nil {
+		return nil, fmt.Errorf("search moments: %w", err)
+	}
+	defer rows.Close()
+	return st.scanMomentRows(ctx, rows, limit)
+}
+
+// ListPublicMoments returns one page of public moments from across the app,
+// newest first, excluding exclusions, blocks, and hidden posts. This backs the
+// Discover page's content rail.
+func (st *Store) ListPublicMoments(ctx context.Context, viewer uuid.UUID, afterCreated *time.Time, afterID *uuid.UUID, limit int) ([]Moment, error) {
+	rows, err := st.db.Pool.Query(ctx, momentColumns+`
+		WHERE m.deleted_at IS NULL
+		  AND m.visibility = '`+VisibilityPublic+`'
+		  AND`+momentVisibilityPredicate+`
+		  AND ($2::timestamptz IS NULL
+		       OR (m.created_at, m.id) < ($2::timestamptz, $3::uuid))
+		ORDER BY m.created_at DESC, m.id DESC
+		LIMIT $4`,
+		viewer, nullableTime(afterCreated), nullableUUID(afterID), limit)
+	if err != nil {
+		return nil, fmt.Errorf("list public moments: %w", err)
+	}
+	defer rows.Close()
+	return st.scanMomentRows(ctx, rows, limit)
 }
 
 // SoftDeleteMoment marks a moment deleted.
