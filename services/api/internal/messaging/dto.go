@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
 
 // timeFormat is the RFC3339 layout used across the API for timestamps.
@@ -61,10 +63,40 @@ type MessageResponse struct {
 	CreatedAt      string          `json:"created_at"`
 	EditedAt       *string         `json:"edited_at"`
 	DeletedAt      *string         `json:"deleted_at"`
+	// Phase 4: advanced-messaging metadata.
+	ReplyTo       *ReplyPreview      `json:"reply_to"`
+	ForwardedFrom *string            `json:"forwarded_from"`
+	PinnedAt      *string            `json:"pinned_at"`
+	Reactions     []ReactionResponse `json:"reactions"`
 }
 
-// toMessageResponse maps a persisted message.
+// ReplyPreview is the compact rendering of the message a reply quotes. `text`
+// is a plain-text preview for list rendering; media replies show their type.
+type ReplyPreview struct {
+	ID          string          `json:"id"`
+	SenderID    string          `json:"sender_id"`
+	MessageType string          `json:"message_type"`
+	Content     json.RawMessage `json:"content"`
+	Deleted     bool            `json:"deleted"`
+	Text        string          `json:"text"`
+}
+
+// ReactionResponse is one emoji's aggregate on a message.
+type ReactionResponse struct {
+	Emoji string   `json:"emoji"`
+	Count int      `json:"count"`
+	Mine  bool     `json:"mine"`
+	Users []string `json:"users"`
+}
+
+// ToMessageResponse renders a message for a caller whose identity is not
+// relevant (conversation previews, socket acks); reaction "mine" is false.
 func ToMessageResponse(m Message) MessageResponse {
+	return ToMessageResponseFor(m, uuid.Nil)
+}
+
+// ToMessageResponseFor renders a message, marking the viewer's own reactions.
+func ToMessageResponseFor(m Message, viewer uuid.UUID) MessageResponse {
 	resp := MessageResponse{
 		ID:             m.ID.String(),
 		ConversationID: m.ConversationID.String(),
@@ -75,6 +107,7 @@ func ToMessageResponse(m Message) MessageResponse {
 		Content:        m.Content,
 		Status:         m.Status,
 		CreatedAt:      m.CreatedAt.UTC().Format(timeFormat),
+		Reactions:      reactionsResponse(m.Reactions, viewer),
 	}
 	if m.EditedAt != nil {
 		s := m.EditedAt.UTC().Format(timeFormat)
@@ -84,7 +117,60 @@ func ToMessageResponse(m Message) MessageResponse {
 		s := m.DeletedAt.UTC().Format(timeFormat)
 		resp.DeletedAt = &s
 	}
+	if m.ForwardedFrom != nil {
+		s := m.ForwardedFrom.String()
+		resp.ForwardedFrom = &s
+	}
+	if m.PinnedAt != nil {
+		s := m.PinnedAt.UTC().Format(timeFormat)
+		resp.PinnedAt = &s
+	}
+	if m.ReplyTo != nil {
+		resp.ReplyTo = replyPreview(m.ReplyTo)
+	}
 	return resp
+}
+
+// replyPreview renders the quoted message a reply references.
+func replyPreview(m *Message) *ReplyPreview {
+	p := &ReplyPreview{
+		ID:          m.ID.String(),
+		SenderID:    m.SenderID.String(),
+		MessageType: m.MessageType,
+		Content:     m.Content,
+		Deleted:     m.DeletedAt != nil,
+	}
+	if m.MessageType == MessageTypeText && len(m.Content) > 0 {
+		var body textContent
+		if json.Unmarshal(m.Content, &body) == nil {
+			p.Text = body.Text
+		}
+	}
+	return p
+}
+
+// reactionsResponse aggregates raw reaction rows by emoji, preserving first-seen
+// order and marking the viewer's own reactions.
+func reactionsResponse(reactions []Reaction, viewer uuid.UUID) []ReactionResponse {
+	out := make([]ReactionResponse, 0)
+	if len(reactions) == 0 {
+		return out
+	}
+	index := make(map[string]int, len(reactions))
+	for _, r := range reactions {
+		i, ok := index[r.Emoji]
+		if !ok {
+			index[r.Emoji] = len(out)
+			out = append(out, ReactionResponse{Emoji: r.Emoji, Users: []string{}})
+			i = len(out) - 1
+		}
+		out[i].Count++
+		out[i].Users = append(out[i].Users, r.UserID.String())
+		if r.UserID == viewer {
+			out[i].Mine = true
+		}
+	}
+	return out
 }
 
 // ConversationResponse is one conversation in a list or a single fetch. For
@@ -184,6 +270,8 @@ type SendInput struct {
 	ClientMsgID string          `json:"client_msg_id"`
 	MessageType string          `json:"message_type"`
 	Content     json.RawMessage `json:"content"`
+	// ReplyToID optionally quotes an earlier message in the same conversation.
+	ReplyToID string `json:"reply_to_id"`
 }
 
 // Validate checks the closed message_type set and the content shape, returning
@@ -197,6 +285,13 @@ func (in *SendInput) Validate() map[string]string {
 		fields["client_msg_id"] = "A client message id is required for retries."
 	} else if len(in.ClientMsgID) > 64 {
 		fields["client_msg_id"] = "Client message id must be at most 64 characters."
+	}
+
+	in.ReplyToID = trimSpace(in.ReplyToID)
+	if in.ReplyToID != "" {
+		if _, err := parseUUID(in.ReplyToID); err != nil {
+			fields["reply_to_id"] = "That is not a valid message id."
+		}
 	}
 
 	if in.MessageType == "" {
@@ -375,6 +470,69 @@ func (in *markReadInput) Validate() map[string]string {
 		fields["sequence_no"] = "Sequence number cannot be negative."
 	}
 	return fields
+}
+
+// --- advanced messaging (Phase 4) payloads ----------------------------------
+
+// maxEmojiLength bounds a reaction; some emoji are multi-codepoint sequences.
+const maxEmojiLength = 16
+
+// maxSearchQueryLength bounds an in-chat search term.
+const maxSearchQueryLength = 100
+
+// editMessageInput is the body for PATCH /conversations/:id/messages/:messageId.
+type editMessageInput struct {
+	Text string `json:"text"`
+}
+
+// Validate normalizes the new body and returns per-field errors.
+func (in *editMessageInput) Validate() map[string]string {
+	in.Text = trimSpace(in.Text)
+	switch {
+	case in.Text == "":
+		return map[string]string{"text": "Message cannot be empty."}
+	case utf8.RuneCountInString(in.Text) > maxTextLength:
+		return map[string]string{"text": "Message must be at most 4000 characters."}
+	}
+	return nil
+}
+
+// forwardInput is the body for POST /conversations/:id/messages/forward, where
+// :id is the destination conversation.
+type forwardInput struct {
+	SourceConversationID string `json:"source_conversation_id"`
+	MessageID            string `json:"message_id"`
+}
+
+// Validate normalizes the ids and returns per-field errors.
+func (in *forwardInput) Validate() map[string]string {
+	fields := map[string]string{}
+	in.SourceConversationID = trimSpace(in.SourceConversationID)
+	in.MessageID = trimSpace(in.MessageID)
+	if _, err := parseUUID(in.SourceConversationID); err != nil {
+		fields["source_conversation_id"] = "That is not a valid conversation id."
+	}
+	if _, err := parseUUID(in.MessageID); err != nil {
+		fields["message_id"] = "That is not a valid message id."
+	}
+	return fields
+}
+
+// reactionInput is the body for adding a reaction.
+type reactionInput struct {
+	Emoji string `json:"emoji"`
+}
+
+// Validate requires a short, non-empty emoji.
+func (in *reactionInput) Validate() map[string]string {
+	in.Emoji = trimSpace(in.Emoji)
+	switch {
+	case in.Emoji == "":
+		return map[string]string{"emoji": "An emoji is required."}
+	case utf8.RuneCountInString(in.Emoji) > maxEmojiLength:
+		return map[string]string{"emoji": "That reaction is too long."}
+	}
+	return nil
 }
 
 // --- group payloads ---------------------------------------------------------

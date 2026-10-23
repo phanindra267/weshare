@@ -1,9 +1,9 @@
 # Phase Status
 
 **Project:** WeShare
-**Phase:** 8 — Discover and Global Search
+**Phase:** 4 — Advanced Messaging
 **Status:** Verified
-**Last updated:** 2026-10-19
+**Last updated:** 2026-10-23
 
 ## Phase overview
 
@@ -13,7 +13,7 @@
 | 1 | Authentication, Accounts, and Profiles | Verified |
 | 2 | Contacts and Presence | Verified |
 | 3 | One-to-One Real-Time Messaging | Verified |
-| 4 | Advanced Messaging (edit, delete, reply, forward, react, pin, search) | Not started |
+| 4 | Advanced Messaging (edit, delete, reply, forward, react, pin, search) | Verified |
 | 5 | Groups | Verified |
 | 6 | Media, Attachments, and Voice Messages | Verified |
 | 7 | Moments and Social Feed | Verified |
@@ -29,10 +29,8 @@ duplicated Phases 6 and 7 and left the file claiming **"the plan has no Phase
 8"**. That claim was wrong. This document now follows the master prompt:
 
 - **Phase 4 — Advanced Messaging** is the chat power-feature phase (edit,
-  delete, reply, forward, react, pin, in-chat search). It is **not implemented**
-  yet: the schema and contract placeholders (`edited_at`, `deleted_at`,
-  `message.updated`, `message.deleted`) exist, but there is no write path. This
-  is the one remaining gap below Phase 8.
+  delete, reply, forward, react, pin, in-chat search). It is **implemented and
+  verified** (migration `000014_advanced_messaging`).
 - **Phase 5 — Groups** is what the old "Phase 4 — Groups, Media, Voice" section
   described. Media and voice messages belong to Phase 6.
 - **Phase 6 — Media, Attachments, and Voice Messages** (unchanged label).
@@ -43,6 +41,84 @@ duplicated Phases 6 and 7 and left the file claiming **"the plan has no Phase
 - **Phase 10 — Notifications and Synchronization** is new (this document).
 
 Roadmap reference: `docs/IMPLEMENTATION_AUDIT.md` ("Missing / planned by phase").
+
+---
+
+## Phase 4 — Advanced Messaging
+
+### Acceptance criteria
+
+| Item | Status | Notes |
+|---|---|---|
+| Schema | Completed | Migration `000014_advanced_messaging`: `messages.reply_to_id` (self FK), `forwarded_from_id`, `edited_at`, `deleted_at`, `pinned_at`, `pinned_by`, and `message_reactions` (`message_id`, `user_id`, `emoji`, unique per user/emoji). Also widens `messages_message_type_check` to accept `'video'`, which the Phase 6 media path could already write |
+| Edit a message | Completed | `PATCH /api/v1/conversations/:id/messages/:messageId`; sender only, text messages only, within a 15-minute `editWindow`, not deleted; sets `edited_at` and republishes `message.updated` |
+| Delete a message | Completed | `DELETE /api/v1/conversations/:id/messages/:messageId`; soft delete for everyone (tombstone, content scrubbed to `{}`). Sender may delete their own; group admins/owners may delete others'. Publishes `message.deleted` |
+| Reply | Completed | `reply_to_id` on send (REST and socket), stored as a self-FK and hydrated into `reply_to` with the quoted sender/body; `422` when the target is missing or in another conversation |
+| Forward | Completed | `POST /api/v1/conversations/:id/messages/forward` where `:id` is the **target**; body carries `source_conversation_id` + `message_id`. Copies `message_type`/`content`, sets `forwarded_from_id`, and fans out to the target members; system messages are rejected |
+| React / unreact | Completed | `PUT`/`DELETE /api/v1/conversations/:id/messages/:messageId/reactions` with an emoji; `message_reactions` is unique per `(message, user, emoji)`; the response returns the full aggregate with a viewer-specific `mine` flag |
+| Pin / unpin | Completed | `PUT`/`DELETE /api/v1/conversations/:id/messages/:messageId/pin`; any member may pin; `pinned_at`/`pinned_by` recorded; `GET /api/v1/conversations/:id/pins` lists pinned messages newest-first |
+| In-chat search | Completed | `GET /api/v1/conversations/:id/messages/search?q=`; membership-scoped, text-only, excludes deleted messages, escaped `%`/`_`/`\` with SQL `ESCAPE '\'`, paginated with the standard envelope |
+| Realtime | Completed | `message.updated`, `message.deleted`, `message.reaction`, `message.pinned`; `message.reaction`/`message.updated` are fanned out per member with viewer-specific `mine` aggregation, while `message.deleted`/`message.pinned` use a single broadcast. Socket `message.send` gains `reply_to_id` |
+| Authorization | Completed | Every route is membership-scoped (non-members get `404`); edit is sender-only; reaction/pin changes are validated against the conversation |
+| Validation | Completed | Edit: non-empty text ≤ 4000 runes; emoji: non-empty, ≤ 32 bytes; search `q` required (≤ 100 runes); unknown/malformed ids → `422`; failures use the standard `{"fields": {...}}` envelope |
+| Frontend: message actions | Completed | Hover action bar (Reply, Forward, Edit, Delete, Pin/Unpin, Add reaction), quoted reply preview, "Forwarded" label, pinned badge, "(edited)" marker, tombstone, reaction chips + picker with counts |
+| Frontend: composer | Completed | Reply/edit banner, prefilled composer with a "Save" label for edits, cancel returns to a normal send |
+| Frontend: forward + search + pins | Completed | `ForwardDialog` target picker, in-thread search bar with result jump, and a pinned-messages panel |
+| Frontend: realtime reducers | Completed | `applyReactions`/`applyPinned` keep state consistent across `message.updated`/`message.reaction`/`message.deleted`/`message.pinned`, including viewer-specific `mine` |
+| Contracts | Completed | `openapi.yaml` gains the 7 new paths and `ReactionResponse`, `EditMessageRequest`, `ForwardMessageRequest`, `ReactionRequest`, `SendMessageRequest.reply_to_id`; `websocket-events.md` documents the new frames and `message.send.reply_to_id` |
+
+### Design notes
+
+- **Soft delete, for everyone.** A deleted message keeps its row (and sequence) so
+  clients can render a stable tombstone instead of a disappearing gap; the body
+  is scrubbed to `{}` so no content survives in the database.
+- **Reply targets are references, not copies.** `reply_to_id` is a self-FK and
+  the quoted message is hydrated with a batched `MessagesByIDs`, so an edit to
+  the original is reflected in the quote. A reply to a tombstone is rendered
+  without content.
+- **Forwards are copies with provenance.** Forwarding copies `message_type` and
+  `content` (including media URLs) and records `forwarded_from_id`; it does not
+  create a live link to the source, so later edits to the source are not
+  propagated.
+- **`ToMessageResponse` stays viewer-agnostic.** Reaction `mine` and message
+  `status` depend on the viewer, so the service uses `ToMessageResponseFor` and
+  `broadcastViewer` to send each member their own aggregate; a single broadcast
+  would otherwise show another user's `mine` flag.
+- **Pin is membership-wide.** Any member can pin; the pin list is shared. This
+  is a chat-annotation feature, not an admin-only moderation tool (delete is the
+  moderation action).
+- **Route shape avoids Gin conflicts.** `/:id/messages/search` and
+  `/:id/messages/forward` are declared before `/:id/messages/:messageId`, and
+  `pins` lives at `/:id/pins`, so no static segment is shadowed by a parameter.
+- **Search is substring `ILIKE`.** No ranking or full-text index (same accepted
+  limit as Phase 8 search).
+
+### Test results (actual, not aspirational)
+
+**Go backend** (`services/api`):
+- `go build ./...` → exit 0
+- `go vet ./...` → exit 0
+- `gofmt -l .` → clean
+- `go test ./...` → pass in every package; `internal/messaging` covers edit
+  permissions/window/type, soft delete (self and group moderation), reaction
+  idempotency and aggregates, pin/unpin, search escaping and membership, forward
+  provenance, and reply hydration.
+
+**Frontend** (`apps/web`):
+- `npx tsc --noEmit` → exit 0
+- `npx eslint src` → 0 problems
+- `npx vitest run` → 75/75 passed across 13 files (adds the Phase 4
+  `ConversationsView` suite and `applyReactions`/`applyPinned` reducer tests)
+- `npx next build` → succeeds (12 static pages)
+
+**Live REST** — `phase4_live.ps1`, all 57 checks pass, covering edit, reply,
+forward, reactions, pin/unpin/pins, in-chat search, delete, group moderation,
+and validation/authorization failures.
+
+**Live browser E2E** — `apps/web/e2e/advanced-messaging.spec.ts` passes with two
+real Chromium sessions against the real API, database, and WebSocket: send →
+edit → react → pin → reply → forward → search → delete, with Bob observing each
+mutation live (no reload).
 
 ---
 
@@ -406,13 +482,9 @@ built on. This is documented in `websocket-events.md` and
 
 ## Known gaps
 
-- **Phase 4 — Advanced Messaging** is not implemented: message edit/delete have
-  schema (`edited_at`, `deleted_at`) and contract (`message.updated`,
-  `message.deleted`) placeholders but no write path; reply/forward/react/pin and
-  in-chat search are also outstanding.
-- **Mini-apps (Phase 12)**, the **demo wallet**, **settings/privacy/accessibility**,
-  and the **social** surface are not implemented; the corresponding feature
-  directories are empty scaffolding.
+- **Mini-apps (Phase 12)**, the **demo wallet (Phase 11)**, **settings/privacy/
+  accessibility (Phase 13)**, and the **social** surface are not implemented; the
+  corresponding feature directories are empty scaffolding.
 - `users` package has no unit tests (covered indirectly by live E2E checks).
 - Search matching is substring `ILIKE` with no ranking or full-text index; fine
   at current scale, and it does not scale to large corpora without one.
@@ -429,7 +501,6 @@ built on. This is documented in `websocket-events.md` and
 
 ## Next action
 
-**Phase 4 — Advanced Messaging** (edit, delete, reply, forward, react, pin,
-in-chat search) is the next unstarted phase below the current one. Read
-`docs/NEXT_STEPS.md` for the ordered plan. Keep `PHASE_STATUS.md` /
-`NEXT_STEPS.md` in sync as work lands.
+**Phase 11 — Demo Wallet** is the next unstarted phase below the frontier
+(Phases 0–10 are verified). Read `docs/NEXT_STEPS.md` for the ordered plan. Keep
+`PHASE_STATUS.md` / `NEXT_STEPS.md` in sync as work lands.

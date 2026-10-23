@@ -48,6 +48,7 @@ type fakeStore struct {
 	canMessage bool
 	inserted   Message
 	insertDup  bool
+	lastInsert InsertMessageParams
 	messages   []Message
 	hasMore    bool
 	statuses   map[uuid.UUID]string
@@ -66,15 +67,29 @@ type fakeStore struct {
 	roleSet       bool
 	leaveDeleted  bool
 	leaveNewOwner *uuid.UUID
+
+	// Advanced messaging (Phase 4).
+	message        Message
+	messageErr     error
+	messagesByID   map[uuid.UUID]Message
+	edited         Message
+	reactions      map[uuid.UUID][]Reaction
+	deletedIDs     []uuid.UUID
+	pinnedAt       *time.Time
+	pinnedMessages []Message
+	searchResults  []Message
+	searchHasMore  bool
 }
 
 func newFakeStore() *fakeStore {
 	return &fakeStore{
-		members:  map[uuid.UUID]map[uuid.UUID]bool{},
-		states:   map[uuid.UUID]map[uuid.UUID]MemberReadState{},
-		nextSeq:  map[uuid.UUID]int64{},
-		roles:    map[uuid.UUID]map[uuid.UUID]string{},
-		profiles: map[uuid.UUID]ProfileBrief{},
+		members:      map[uuid.UUID]map[uuid.UUID]bool{},
+		states:       map[uuid.UUID]map[uuid.UUID]MemberReadState{},
+		nextSeq:      map[uuid.UUID]int64{},
+		roles:        map[uuid.UUID]map[uuid.UUID]string{},
+		profiles:     map[uuid.UUID]ProfileBrief{},
+		messagesByID: map[uuid.UUID]Message{},
+		reactions:    map[uuid.UUID][]Reaction{},
 	}
 }
 
@@ -114,7 +129,22 @@ func (f *fakeStore) CanMessage(context.Context, uuid.UUID, uuid.UUID) (bool, err
 	return f.canMessage, nil
 }
 
-func (f *fakeStore) InsertMessage(context.Context, InsertMessageParams) (Message, bool, error) {
+func (f *fakeStore) InsertMessage(_ context.Context, p InsertMessageParams) (Message, bool, error) {
+	f.lastInsert = p
+	// Mirror the real store: echo the persisted reply/forward links onto the
+	// returned row so callers see exactly what was written.
+	if f.inserted.ForwardedFrom == nil {
+		f.inserted.ForwardedFrom = p.ForwardedFrom
+	}
+	if f.inserted.ReplyToID == nil {
+		f.inserted.ReplyToID = p.ReplyToID
+	}
+	if f.inserted.ConversationID == uuid.Nil {
+		f.inserted.ConversationID = p.ConversationID
+	}
+	if f.inserted.SenderID == uuid.Nil {
+		f.inserted.SenderID = p.SenderID
+	}
 	return f.inserted, f.insertDup, nil
 }
 
@@ -268,6 +298,80 @@ func (f *fakeStore) LeaveGroup(_ context.Context, conv, user uuid.UUID) (bool, *
 		delete(f.roles[conv], user)
 	}
 	return f.leaveDeleted, f.leaveNewOwner, nil
+}
+
+// --- advanced messaging (Phase 4) -------------------------------------------
+
+func (f *fakeStore) MessageFor(_ context.Context, _, _ uuid.UUID) (Message, error) {
+	if f.messageErr != nil {
+		return Message{}, f.messageErr
+	}
+	return f.message, nil
+}
+
+func (f *fakeStore) MessagesByIDs(_ context.Context, ids []uuid.UUID) (map[uuid.UUID]Message, error) {
+	out := map[uuid.UUID]Message{}
+	for _, id := range ids {
+		if m, ok := f.messagesByID[id]; ok {
+			out[id] = m
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) EditMessage(_ context.Context, _ uuid.UUID, content json.RawMessage, editedAt time.Time) (Message, error) {
+	f.edited.Content = content
+	f.edited.EditedAt = &editedAt
+	return f.edited, nil
+}
+
+func (f *fakeStore) SoftDeleteMessage(_ context.Context, id uuid.UUID, _ time.Time) error {
+	f.deletedIDs = append(f.deletedIDs, id)
+	return nil
+}
+
+func (f *fakeStore) AddReaction(_ context.Context, messageID, userID uuid.UUID, emoji string) (bool, error) {
+	f.reactions[messageID] = append(f.reactions[messageID],
+		Reaction{MessageID: messageID, UserID: userID, Emoji: emoji})
+	return true, nil
+}
+
+func (f *fakeStore) RemoveReaction(_ context.Context, messageID, userID uuid.UUID, emoji string) (bool, error) {
+	list := f.reactions[messageID]
+	kept := make([]Reaction, 0, len(list))
+	removed := false
+	for _, r := range list {
+		if r.UserID == userID && r.Emoji == emoji {
+			removed = true
+			continue
+		}
+		kept = append(kept, r)
+	}
+	f.reactions[messageID] = kept
+	return removed, nil
+}
+
+func (f *fakeStore) ReactionsFor(_ context.Context, ids []uuid.UUID) (map[uuid.UUID][]Reaction, error) {
+	out := map[uuid.UUID][]Reaction{}
+	for _, id := range ids {
+		if rs, ok := f.reactions[id]; ok {
+			out[id] = rs
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeStore) PinMessage(_ context.Context, _ uuid.UUID, pinnedAt *time.Time) error {
+	f.pinnedAt = pinnedAt
+	return nil
+}
+
+func (f *fakeStore) PinnedMessages(context.Context, uuid.UUID) ([]Message, error) {
+	return f.pinnedMessages, nil
+}
+
+func (f *fakeStore) SearchMessages(context.Context, uuid.UUID, uuid.UUID, string, *int64, int) ([]Message, bool, error) {
+	return f.searchResults, f.searchHasMore, nil
 }
 
 // --- OpenConversation -------------------------------------------------------
@@ -897,5 +1001,316 @@ func TestJoinNames(t *testing.T) {
 		if got := joinNames(names); got != want {
 			t.Fatalf("joinNames(%v) = %q, want %q", names, got, want)
 		}
+	}
+}
+
+// --- advanced messaging (Phase 4) -------------------------------------------
+
+// directStore builds a fake store for a direct conversation with the given
+// message preloaded as the target of an action.
+func directStore(conv, sender, other uuid.UUID, msg Message) *fakeStore {
+	fs := newFakeStore()
+	fs.members[conv] = map[uuid.UUID]bool{sender: true, other: true}
+	fs.groupConv = Conversation{ID: conv, Kind: ConversationKindDirect}
+	msg.ConversationID = conv
+	fs.message = msg
+	return fs
+}
+
+func TestEditMessage_NotSenderForbidden(t *testing.T) {
+	conv, sender, other := uuid.New(), uuid.New(), uuid.New()
+	fs := directStore(conv, sender, other, Message{ID: uuid.New(), SenderID: sender, MessageType: MessageTypeText, CreatedAt: time.Now()})
+	_, err := NewService(fs, nil).EditMessage(context.Background(), other, conv, fs.message.ID, "new")
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("want ErrForbidden, got %v", err)
+	}
+}
+
+func TestEditMessage_WindowClosed(t *testing.T) {
+	conv, sender, other := uuid.New(), uuid.New(), uuid.New()
+	fs := directStore(conv, sender, other, Message{ID: uuid.New(), SenderID: sender, MessageType: MessageTypeText, CreatedAt: time.Now().Add(-time.Hour)})
+	_, err := NewService(fs, nil).EditMessage(context.Background(), sender, conv, fs.message.ID, "new")
+	if !errors.Is(err, ErrEditWindowClosed) {
+		t.Fatalf("want ErrEditWindowClosed, got %v", err)
+	}
+}
+
+func TestEditMessage_NonTextRejected(t *testing.T) {
+	conv, sender, other := uuid.New(), uuid.New(), uuid.New()
+	fs := directStore(conv, sender, other, Message{ID: uuid.New(), SenderID: sender, MessageType: MessageTypeImage, CreatedAt: time.Now()})
+	_, err := NewService(fs, nil).EditMessage(context.Background(), sender, conv, fs.message.ID, "new")
+	if !errors.Is(err, ErrNotEditableType) {
+		t.Fatalf("want ErrNotEditableType, got %v", err)
+	}
+}
+
+func TestEditMessage_DeletedRejected(t *testing.T) {
+	conv, sender, other := uuid.New(), uuid.New(), uuid.New()
+	deleted := time.Now()
+	fs := directStore(conv, sender, other, Message{ID: uuid.New(), SenderID: sender, MessageType: MessageTypeText, CreatedAt: time.Now(), DeletedAt: &deleted})
+	_, err := NewService(fs, nil).EditMessage(context.Background(), sender, conv, fs.message.ID, "new")
+	if !errors.Is(err, ErrCannotEditDeleted) {
+		t.Fatalf("want ErrCannotEditDeleted, got %v", err)
+	}
+}
+
+func TestEditMessage_OKBroadcasts(t *testing.T) {
+	conv, sender, other := uuid.New(), uuid.New(), uuid.New()
+	fs := directStore(conv, sender, other, Message{ID: uuid.New(), SenderID: sender, MessageType: MessageTypeText, Content: json.RawMessage(`{"text":"old"}`), CreatedAt: time.Now()})
+	fs.edited = fs.message
+
+	pub := newRecordingPublisher(sender, other)
+	got, err := NewService(fs, pub).EditMessage(context.Background(), sender, conv, fs.message.ID, "new")
+	if err != nil {
+		t.Fatalf("EditMessage: %v", err)
+	}
+	if got.EditedAt == nil {
+		t.Fatal("expected edited_at to be set")
+	}
+	var body textContent
+	if err := json.Unmarshal(got.Content, &body); err != nil || body.Text != "new" {
+		t.Fatalf("content = %s (err %v), want text new", got.Content, err)
+	}
+	for _, u := range []uuid.UUID{sender, other} {
+		found := false
+		for _, e := range pub.events {
+			if e.user == u {
+				if _, ok := e.event.(MessageUpdatedEvent); ok {
+					found = true
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("user %s did not receive message.updated", u)
+		}
+	}
+}
+
+func TestDeleteMessage_SenderTombstones(t *testing.T) {
+	conv, sender, other := uuid.New(), uuid.New(), uuid.New()
+	fs := directStore(conv, sender, other, Message{ID: uuid.New(), SenderID: sender, MessageType: MessageTypeText, Content: json.RawMessage(`{"text":"bye"}`)})
+	pub := newRecordingPublisher(sender, other)
+	got, err := NewService(fs, pub).DeleteMessage(context.Background(), sender, conv, fs.message.ID)
+	if err != nil {
+		t.Fatalf("DeleteMessage: %v", err)
+	}
+	if got.DeletedAt == nil {
+		t.Fatal("expected deleted_at to be set")
+	}
+	if string(got.Content) != "{}" {
+		t.Fatalf("content not scrubbed: %s", got.Content)
+	}
+	if len(fs.deletedIDs) != 1 {
+		t.Fatalf("deletedIDs = %v, want one", fs.deletedIDs)
+	}
+}
+
+func TestDeleteMessage_NonSenderDirectForbidden(t *testing.T) {
+	conv, sender, other := uuid.New(), uuid.New(), uuid.New()
+	fs := directStore(conv, sender, other, Message{ID: uuid.New(), SenderID: sender, MessageType: MessageTypeText})
+	_, err := NewService(fs, nil).DeleteMessage(context.Background(), other, conv, fs.message.ID)
+	if !errors.Is(err, ErrForbidden) {
+		t.Fatalf("want ErrForbidden, got %v", err)
+	}
+}
+
+func TestDeleteMessage_GroupAdminAllowed(t *testing.T) {
+	conv, sender, admin := uuid.New(), uuid.New(), uuid.New()
+	fs := newFakeStore()
+	fs.members[conv] = map[uuid.UUID]bool{sender: true, admin: true}
+	fs.roles[conv] = map[uuid.UUID]string{sender: RoleMember, admin: RoleAdmin}
+	fs.groupConv = Conversation{ID: conv, Kind: ConversationKindGroup}
+	fs.message = Message{ID: uuid.New(), ConversationID: conv, SenderID: sender, MessageType: MessageTypeText}
+
+	got, err := NewService(fs, nil).DeleteMessage(context.Background(), admin, conv, fs.message.ID)
+	if err != nil {
+		t.Fatalf("DeleteMessage: %v", err)
+	}
+	if got.DeletedAt == nil {
+		t.Fatal("expected deletion")
+	}
+}
+
+func TestReaction_AddAndBroadcast(t *testing.T) {
+	conv, sender, other := uuid.New(), uuid.New(), uuid.New()
+	fs := directStore(conv, sender, other, Message{ID: uuid.New(), SenderID: sender, MessageType: MessageTypeText})
+	pub := newRecordingPublisher(sender, other)
+	got, err := NewService(fs, pub).AddReaction(context.Background(), other, conv, fs.message.ID, "\U0001F44D")
+	if err != nil {
+		t.Fatalf("AddReaction: %v", err)
+	}
+	if len(got) != 1 || got[0].Emoji != "\U0001F44D" || !got[0].Mine || got[0].Count != 1 {
+		t.Fatalf("reactions = %+v", got)
+	}
+	found := false
+	for _, e := range pub.events {
+		if ev, ok := e.event.(MessageReactionEvent); ok && ev.MessageID == fs.message.ID.String() {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("no message.reaction event broadcast")
+	}
+
+	if _, err := NewService(fs, nil).RemoveReaction(context.Background(), other, conv, fs.message.ID, "\U0001F44D"); err != nil {
+		t.Fatalf("RemoveReaction: %v", err)
+	}
+	if len(fs.reactions[fs.message.ID]) != 0 {
+		t.Fatalf("reaction not removed: %+v", fs.reactions[fs.message.ID])
+	}
+}
+
+func TestReaction_SystemMessageRejected(t *testing.T) {
+	conv, sender, other := uuid.New(), uuid.New(), uuid.New()
+	fs := directStore(conv, sender, other, Message{ID: uuid.New(), SenderID: sender, MessageType: MessageTypeSystem})
+	_, err := NewService(fs, nil).AddReaction(context.Background(), other, conv, fs.message.ID, "\U0001F44D")
+	if !errors.Is(err, ErrNotReactable) {
+		t.Fatalf("want ErrNotReactable, got %v", err)
+	}
+}
+
+func TestSetPin_DirectAllowed(t *testing.T) {
+	conv, sender, other := uuid.New(), uuid.New(), uuid.New()
+	fs := directStore(conv, sender, other, Message{ID: uuid.New(), SenderID: sender, MessageType: MessageTypeText})
+	if err := NewService(fs, nil).SetPin(context.Background(), other, conv, fs.message.ID, true); err != nil {
+		t.Fatalf("SetPin: %v", err)
+	}
+	if fs.pinnedAt == nil {
+		t.Fatal("expected pinned_at set")
+	}
+}
+
+func TestSetPin_GroupMemberForbidden(t *testing.T) {
+	conv, owner, member := uuid.New(), uuid.New(), uuid.New()
+	fs := newFakeStore()
+	fs.members[conv] = map[uuid.UUID]bool{owner: true, member: true}
+	fs.roles[conv] = map[uuid.UUID]string{owner: RoleOwner, member: RoleMember}
+	fs.groupConv = Conversation{ID: conv, Kind: ConversationKindGroup}
+	fs.message = Message{ID: uuid.New(), ConversationID: conv, SenderID: owner, MessageType: MessageTypeText}
+	err := NewService(fs, nil).SetPin(context.Background(), member, conv, fs.message.ID, true)
+	if !errors.Is(err, ErrPinForbidden) {
+		t.Fatalf("want ErrPinForbidden, got %v", err)
+	}
+}
+
+func TestSetPin_GroupAdminAllowed(t *testing.T) {
+	conv, owner, admin := uuid.New(), uuid.New(), uuid.New()
+	fs := newFakeStore()
+	fs.members[conv] = map[uuid.UUID]bool{owner: true, admin: true}
+	fs.roles[conv] = map[uuid.UUID]string{owner: RoleOwner, admin: RoleAdmin}
+	fs.groupConv = Conversation{ID: conv, Kind: ConversationKindGroup}
+	fs.message = Message{ID: uuid.New(), ConversationID: conv, SenderID: owner, MessageType: MessageTypeText}
+	if err := NewService(fs, nil).SetPin(context.Background(), admin, conv, fs.message.ID, true); err != nil {
+		t.Fatalf("SetPin: %v", err)
+	}
+}
+
+func TestForwardMessage_CopiesContent(t *testing.T) {
+	source, target, me := uuid.New(), uuid.New(), uuid.New()
+	fs := newFakeStore()
+	fs.members[source] = map[uuid.UUID]bool{me: true}
+	fs.members[target] = map[uuid.UUID]bool{me: true}
+	src := Message{ID: uuid.New(), ConversationID: source, SenderID: me, MessageType: MessageTypeText, Content: json.RawMessage(`{"text":"fwd"}`)}
+	fs.message = src
+	fs.inserted = Message{ID: uuid.New(), ConversationID: target, SenderID: me, SequenceNo: 1, MessageType: MessageTypeText, Content: src.Content}
+
+	got, err := NewService(fs, nil).ForwardMessage(context.Background(), me, target, source, src.ID)
+	if err != nil {
+		t.Fatalf("ForwardMessage: %v", err)
+	}
+	if got.ForwardedFrom == nil || *got.ForwardedFrom != src.ID {
+		t.Fatalf("forwarded_from = %v, want %s", got.ForwardedFrom, src.ID)
+	}
+}
+
+func TestForwardMessage_DeletedRejected(t *testing.T) {
+	source, target, me := uuid.New(), uuid.New(), uuid.New()
+	fs := newFakeStore()
+	fs.members[source] = map[uuid.UUID]bool{me: true}
+	fs.members[target] = map[uuid.UUID]bool{me: true}
+	deleted := time.Now()
+	fs.message = Message{ID: uuid.New(), ConversationID: source, MessageType: MessageTypeText, DeletedAt: &deleted}
+	_, err := NewService(fs, nil).ForwardMessage(context.Background(), me, target, source, fs.message.ID)
+	if !errors.Is(err, ErrCannotForwardDeleted) {
+		t.Fatalf("want ErrCannotForwardDeleted, got %v", err)
+	}
+}
+
+func TestForwardMessage_SystemRejected(t *testing.T) {
+	source, target, me := uuid.New(), uuid.New(), uuid.New()
+	fs := newFakeStore()
+	fs.members[source] = map[uuid.UUID]bool{me: true}
+	fs.members[target] = map[uuid.UUID]bool{me: true}
+	fs.message = Message{ID: uuid.New(), ConversationID: source, MessageType: MessageTypeSystem}
+	_, err := NewService(fs, nil).ForwardMessage(context.Background(), me, target, source, fs.message.ID)
+	if !errors.Is(err, ErrNotForwardable) {
+		t.Fatalf("want ErrNotForwardable, got %v", err)
+	}
+}
+
+func TestSearchMessages_EmptyQuery(t *testing.T) {
+	conv, me := uuid.New(), uuid.New()
+	fs := newFakeStore()
+	fs.members[conv] = map[uuid.UUID]bool{me: true}
+	_, _, err := NewService(fs, nil).SearchMessages(context.Background(), me, conv, "   ", nil, 0)
+	if !errors.Is(err, ErrEmptySearch) {
+		t.Fatalf("want ErrEmptySearch, got %v", err)
+	}
+}
+
+func TestSearchMessages_ReturnsAscendingWithCursor(t *testing.T) {
+	conv, me := uuid.New(), uuid.New()
+	fs := newFakeStore()
+	fs.members[conv] = map[uuid.UUID]bool{me: true}
+	fs.searchResults = []Message{
+		{ID: uuid.New(), SequenceNo: 2, MessageType: MessageTypeText},
+		{ID: uuid.New(), SequenceNo: 5, MessageType: MessageTypeText},
+	}
+	fs.searchHasMore = true
+	items, next, err := NewService(fs, nil).SearchMessages(context.Background(), me, conv, "hi", nil, 0)
+	if err != nil {
+		t.Fatalf("SearchMessages: %v", err)
+	}
+	if len(items) != 2 || items[0].SequenceNo != 2 {
+		t.Fatalf("items = %+v", items)
+	}
+	if next != "2" {
+		t.Fatalf("next = %q, want 2", next)
+	}
+}
+
+func TestSendMessage_ReplyTargetMissing(t *testing.T) {
+	conv, me := uuid.New(), uuid.New()
+	fs := newFakeStore()
+	fs.members[conv] = map[uuid.UUID]bool{me: true}
+	fs.messageErr = ErrMessageNotFound
+	in := SendInput{ClientMsgID: "c1", MessageType: MessageTypeText, Content: json.RawMessage(`{"text":"hi"}`), ReplyToID: uuid.NewString()}
+	_, _, err := NewService(fs, nil).SendMessage(context.Background(), me, conv, &in)
+	var invalid *ValidationError
+	if !errors.As(err, &invalid) {
+		t.Fatalf("want ValidationError, got %v", err)
+	}
+	if invalid.Fields["reply_to_id"] == "" {
+		t.Fatalf("expected reply_to_id field error, got %v", invalid.Fields)
+	}
+}
+
+func TestSendMessage_ReplyHydrates(t *testing.T) {
+	conv, me, peer := uuid.New(), uuid.New(), uuid.New()
+	fs := newFakeStore()
+	fs.members[conv] = map[uuid.UUID]bool{me: true, peer: true}
+	original := Message{ID: uuid.New(), ConversationID: conv, SenderID: peer, SequenceNo: 1, MessageType: MessageTypeText, Content: json.RawMessage(`{"text":"orig"}`)}
+	fs.message = original
+	fs.messagesByID[original.ID] = original
+	replyTo := original.ID
+	fs.inserted = Message{ID: uuid.New(), ConversationID: conv, SenderID: me, SequenceNo: 2, MessageType: MessageTypeText, Content: json.RawMessage(`{"text":"re"}`), ReplyToID: &replyTo}
+
+	in := SendInput{ClientMsgID: "c1", MessageType: MessageTypeText, Content: json.RawMessage(`{"text":"re"}`), ReplyToID: original.ID.String()}
+	got, _, err := NewService(fs, nil).SendMessage(context.Background(), me, conv, &in)
+	if err != nil {
+		t.Fatalf("SendMessage: %v", err)
+	}
+	if got.ReplyTo == nil || got.ReplyTo.ID != original.ID {
+		t.Fatalf("reply not hydrated: %+v", got.ReplyTo)
 	}
 }

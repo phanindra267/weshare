@@ -138,6 +138,7 @@ type clientMessage struct {
 	ClientMsgID    string          `json:"client_msg_id"`
 	MessageType    string          `json:"message_type"`
 	Content        json.RawMessage `json:"content"`
+	ReplyToID      string          `json:"reply_to_id"`
 	Typing         *bool           `json:"typing"`
 	SequenceNo     *int64          `json:"sequence_no"`
 	After          *int64          `json:"after"`
@@ -215,6 +216,7 @@ func (c *conn) handleSend(msg clientMessage) {
 		ClientMsgID: msg.ClientMsgID,
 		MessageType: msg.MessageType,
 		Content:     msg.Content,
+		ReplyToID:   msg.ReplyToID,
 	}
 	created, _, err := c.svc.SendMessage(context.Background(), c.userID, convID, in)
 	if err != nil {
@@ -226,7 +228,7 @@ func (c *conn) handleSend(msg clientMessage) {
 		Type:           messaging.EventMessageAck,
 		ConversationID: convID.String(),
 		RequestID:      msg.RequestID,
-		Message:        messaging.ToMessageResponse(created),
+		Message:        messaging.ToMessageResponseFor(created, c.userID),
 	})
 }
 
@@ -314,7 +316,7 @@ func (c *conn) handleSync(msg clientMessage) {
 
 	resp := make([]messaging.MessageResponse, 0, len(items))
 	for _, m := range items {
-		resp = append(resp, messaging.ToMessageResponse(m))
+		resp = append(resp, messaging.ToMessageResponseFor(m, c.userID))
 	}
 	c.enqueueEvent(messaging.SyncResultEvent{
 		Type:           messaging.EventSync,

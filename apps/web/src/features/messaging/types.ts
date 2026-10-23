@@ -50,6 +50,25 @@ export interface MessageContent {
   size?: number;
 }
 
+/** One emoji's aggregate reactions on a message. */
+export interface MessageReaction {
+  emoji: string;
+  count: number;
+  /** True when the current viewer reacted with this emoji. */
+  mine: boolean;
+  users: string[];
+}
+
+/** Compact rendering of the message a reply quotes. */
+export interface ReplyPreview {
+  id: string;
+  sender_id: string;
+  message_type: MessageType;
+  content: MessageContent;
+  deleted: boolean;
+  text: string;
+}
+
 export interface Message {
   id: string;
   conversation_id: string;
@@ -62,6 +81,14 @@ export interface Message {
   created_at: string;
   edited_at: string | null;
   deleted_at: string | null;
+  /** The quoted message when this is a reply; null otherwise. */
+  reply_to: ReplyPreview | null;
+  /** Id of the message this was forwarded from; null when not forwarded. */
+  forwarded_from: string | null;
+  /** When the message was pinned; null when not pinned. */
+  pinned_at: string | null;
+  /** Aggregated emoji reactions. */
+  reactions: MessageReaction[];
 }
 
 /**
@@ -136,6 +163,8 @@ export interface SendMessageInput {
   client_msg_id: string;
   message_type: MessageType;
   content: MessageContent;
+  /** Quote an earlier message in the same conversation (Phase 4). */
+  reply_to_id?: string;
 }
 
 // --- realtime protocol ------------------------------------------------------
@@ -225,6 +254,39 @@ export interface MemberChangedEvent {
   action: "added" | "removed" | "left" | "role";
 }
 
+/** A message's body was edited. */
+export interface MessageUpdatedEvent {
+  type: "message.updated";
+  conversation_id: string;
+  message: Message;
+}
+
+/** A message was tombstoned. `message` carries the redacted representation. */
+export interface MessageDeletedEvent {
+  type: "message.deleted";
+  conversation_id: string;
+  message_id: string;
+  message: Message;
+}
+
+/** The full reaction set for one message changed. */
+export interface MessageReactionEvent {
+  type: "message.reaction";
+  conversation_id: string;
+  message_id: string;
+  actor_id: string;
+  reactions: MessageReaction[];
+}
+
+/** A message was pinned or unpinned. */
+export interface MessagePinnedEvent {
+  type: "message.pinned";
+  conversation_id: string;
+  message_id: string;
+  actor_id: string;
+  pinned: boolean;
+}
+
 export type ServerEvent =
   | HelloEvent
   | MessageCreatedEvent
@@ -236,6 +298,10 @@ export type ServerEvent =
   | ReadAckEvent
   | ConversationUpdatedEvent
   | MemberChangedEvent
+  | MessageUpdatedEvent
+  | MessageDeletedEvent
+  | MessageReactionEvent
+  | MessagePinnedEvent
   | MomentCreatedEvent
   | NotificationCreatedEvent
   | RealtimeErrorEvent

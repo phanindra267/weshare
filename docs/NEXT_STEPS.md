@@ -1,15 +1,13 @@
 # Next Steps
 
-**Current phase:** Phase 8 — Discover and Global Search (Verified); Phase 10 —
-Notifications and Synchronization (Verified)
-**Next phase:** Phase 4 — Advanced Messaging
+**Current phase:** Phase 4 — Advanced Messaging (Verified)
+**Next phase:** Phase 11 — Demo Wallet
 
-Phases 0, 1–3, and 5–10 are implemented and verified. **Phase 4 — Advanced
-Messaging** (message edit, delete, reply, forward, react, pin, and in-chat
-search) is the only unstarted phase below the frontier. See
-`docs/PHASE_STATUS.md` for actual, reproducible test results — including the live
-browser E2E suites (`messaging`, `groups`, `moments`, `calls`) and the Go/
-frontend gate runs.
+Phases 0–10 are implemented and verified. **Phase 11 — Demo Wallet** is the next
+unstarted phase (followed by 12 mini-apps and 13 settings/privacy/accessibility).
+See `docs/PHASE_STATUS.md` for actual, reproducible test results — including the
+live browser E2E suites (`messaging`, `advanced-messaging`, `groups`, `moments`,
+`calls`) and the Go/frontend gate runs.
 
 **Numbering note.** Earlier revisions of this file claimed "the plan has no
 Phase 8". That was wrong: Phase 8 is **Discover and Global Search**, Phase 9 is
@@ -17,7 +15,9 @@ Audio and Video Calling, and Phase 10 is Notifications and Synchronization. This
 file and `docs/PHASE_STATUS.md` now follow the master prompt; the reconciliation
 is recorded in `docs/PHASE_STATUS.md` and `docs/IMPLEMENTATION_AUDIT.md`. Older
 revisions also called the calling work "Phase 6" and notifications "Phase 7";
-those numbers belonged to Media/Attachments/Voice (6) and Moments (7).
+those numbers belonged to Media/Attachments/Voice (6) and Moments (7). The
+master prompt continues with **11 = Demo Wallet**, **12 = Mini-apps**, and
+**13 = Settings/Privacy/Accessibility**.
 
 ## Immediate housekeeping
 
@@ -28,9 +28,38 @@ those numbers belonged to Media/Attachments/Voice (6) and Moments (7).
      `npx playwright install chromium`)
 2. **`users` package tests** — still exercised only indirectly; add handler/store
    tests for `GET/PATCH /me`, avatar upload validation, and `GET /users/:id` 404s.
-3. **Message editing/deletion** — schema and contract placeholders exist
-   (`edited_at`, `deleted_at`, `message.updated`/`message.deleted`) but no write
-   path; schedule explicitly (see the user-facing "chat power features" list).
+
+## Phase 4 — Advanced Messaging (delivered)
+
+- **Schema** — `000014_advanced_messaging`: `reply_to_id`, `forwarded_from_id`,
+  `edited_at`, `deleted_at`, `pinned_at`, `pinned_by`, `message_reactions`; also
+  widens the `message_type` CHECK to allow `'video'`.
+- **Backend** (`internal/messaging`) — `PATCH`/`DELETE .../messages/:messageId`,
+  `POST .../messages/forward` (target conversation in `:id`), `PUT`/`DELETE
+  .../messages/:messageId/reactions`, `PUT`/`DELETE .../messages/:messageId/pin`,
+  `GET .../pins`, `GET .../messages/search`. Edit is sender-only, text-only,
+  within 15 minutes. Delete is a soft tombstone (admins may remove others'
+  messages). Reactions are unique per user/emoji and returned as a
+  viewer-specific aggregate. All routes are membership-scoped.
+- **Realtime** — `message.updated`, `message.deleted`, `message.reaction`,
+  `message.pinned`; reaction/update frames are fanned out per member so each
+  viewer gets their own `mine` flag; socket `message.send` accepts `reply_to_id`.
+- **Frontend** — hover action bar, quoted replies, forwarded/pinned/edited
+  markers, tombstones, reaction chips + picker, `ForwardDialog`, in-thread search
+  with result jump, pinned panel, reply/edit composer banner, and realtime
+  reducers (`applyReactions`, `applyPinned`).
+- **Contracts** — 7 new OpenAPI paths plus reaction/edit/forward schemas and
+  `reply_to_id`; `websocket-events.md` documents the new frames.
+- **Tests** — Go unit tests, 16 new `ConversationsView` tests, reducer tests,
+  `phase4_live.ps1` (57 checks), and `e2e/advanced-messaging.spec.ts` with two
+  real browser sessions.
+
+## Phase 11 — Demo Wallet (next)
+
+Not started; `internal/wallet` and `features/wallet` are empty scaffolding.
+Implement a virtual (non-real-money) balance, transfers between demo accounts,
+and a transaction history, backed by Postgres and gated to signed-in users.
+No payment provider or real currency is involved.
 
 ## Phase 10 — Notifications and Synchronization (delivered)
 
@@ -128,8 +157,6 @@ Roadmap reference: `docs/IMPLEMENTATION_AUDIT.md` ("Missing / planned by phase")
 
 - Notifications/Search/Sync: `notification.created` is reserved but not emitted;
   message/contact search; `sync` catches up one 200-message page per reconnect.
-- Chat power features (edit, delete, reply, forward, react, pin, search):
-  schema and contract placeholders only.
 - Moments likes/comments have no realtime events; counts refresh on demand.
 - Email/SMS verification: development-only adapter; never simulate fake delivery.
 - Rate limiting is in-memory per IP/user — dev-only (not distributed).

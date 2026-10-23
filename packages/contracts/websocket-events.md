@@ -103,7 +103,7 @@ Unknown fields are ignored so the protocol can grow without breaking clients.
 | Type | Fields | Status | Phase |
 | --- | --- | --- | --- |
 | `ping` | — | Implemented | 3 |
-| `message.send` | `request_id`, `conversation_id`, `client_msg_id`, `message_type`, `content` | Implemented | 3 |
+| `message.send` | `request_id`, `conversation_id`, `client_msg_id`, `message_type`, `content`, `reply_to_id` (optional) | Implemented | 3 |
 | `typing` | `conversation_id`, `typing` (bool) | Implemented | 3 |
 | `read` | `conversation_id`, `sequence_no` | Implemented | 3 |
 | `sync` | `request_id`, `conversation_id`, `after` (sequence_no) | Implemented | 3 |
@@ -125,8 +125,10 @@ Unknown fields are ignored so the protocol can grow without breaking clients.
 | `conversation.updated` | `conversation_id`, `title`, `avatar_url`, `member_count` | Implemented | 4 |
 | `member.changed` | `conversation_id`, `user_id`, `role`, `action` (`added`\|`removed`\|`left`\|`role`) | Implemented | 4 |
 | `moment.created` | `moment` | Implemented | 7 |
-| `message.updated` | `message` | Planned | 4 |
-| `message.deleted` | `message_id` | Planned | 4 |
+| `message.updated` | `conversation_id`, `message` | Implemented | 4 |
+| `message.deleted` | `conversation_id`, `message_id`, `message` | Implemented | 4 |
+| `message.reaction` | `conversation_id`, `message_id`, `actor_id`, `reactions` | Implemented | 4 |
+| `message.pinned` | `conversation_id`, `message_id`, `actor_id`, `pinned` | Implemented | 4 |
 | `notification.created` | — | Planned | — |
 
 Calling (Phase 9) has its own catalogue below, since it carries a second
@@ -146,6 +148,42 @@ user for `member.changed`), and never for direct conversations.
 
 System messages (for example, "Alice added Bob.") arrive as ordinary
 `message.created` events with `message_type: "system"`.
+
+### Advanced messaging events (Phase 4)
+
+Edits, deletes, reactions, and pins are applied through the REST endpoints in
+`openapi.yaml` and then broadcast to every member of the conversation. The
+same rules apply to events and to REST responses: a recipient who is not a
+member of the conversation never receives them.
+
+| Event | Payload | Meaning |
+| --- | --- | --- |
+| `message.updated` | `conversation_id`, `message` | A message body was edited. `message.edited_at` is set and `message.content` carries the new body. |
+| `message.deleted` | `conversation_id`, `message_id`, `message` | A message was tombstoned. `message.deleted_at` is set and `message.content` is an empty object. |
+| `message.reaction` | `conversation_id`, `message_id`, `actor_id`, `reactions` | The full reaction aggregate for the message after a change. |
+| `message.pinned` | `conversation_id`, `message_id`, `actor_id`, `pinned` | A message was pinned (`pinned: true`) or unpinned (`pinned: false`). |
+
+`message.reaction` and `message.updated` are sent **per recipient**, not as a
+single broadcast: the `reactions` array is rendered for that recipient, so
+`mine` is true only for the user who actually reacted. `message.deleted` and
+`message.pinned` are identical for every recipient and are sent once.
+
+The `reactions` array groups by emoji and preserves first-seen order. Each
+entry is `{emoji, count, mine, users}`, where `users` lists the reacting user
+ids. Clients replace the message's reaction set wholesale rather than
+incrementing a counter, which keeps a reconnecting or out-of-order client
+convergent.
+
+A `message.send` may carry `reply_to_id`, naming an earlier message in the
+same conversation. The stored message then renders a quote (`message.reply_to`)
+containing the original id, sender, type, a plain-text preview, and a
+`deleted` flag so clients can show "message deleted" for a quote whose target
+was later tombstoned. `reply_to_id` is ignored by the server when it does not
+name a message in the same conversation.
+
+Forwarded messages are ordinary messages with `forwarded_from` set to the
+original message id; the body is copied verbatim and the forward target
+conversation is the one that receives the `message.created` event.
 
 ### Moments (Phase 7)
 

@@ -14,6 +14,10 @@ export interface MessageComposerProps {
   uploading?: boolean;
   /** Maximum allowed file size in bytes (defaults to 50 MB). */
   maxAttachmentBytes?: number;
+  /** Seed the input on mount. Remount (via `key`) to change it. */
+  initialValue?: string;
+  /** Editing mode: text-only, with a "Save" submit label. */
+  editing?: boolean;
   onSend: (text: string) => void;
   /** Called when the local typing state changes (true on first keystroke). */
   onTyping: (typing: boolean) => void;
@@ -44,13 +48,15 @@ export function MessageComposer({
   disabled,
   uploading,
   maxAttachmentBytes = 50 * 1024 * 1024,
+  initialValue,
+  editing,
   onSend,
   onTyping,
   onAttach,
   onAttachError,
   onVoice,
 }: MessageComposerProps) {
-  const [value, setValue] = React.useState("");
+  const [value, setValue] = React.useState(initialValue ?? "");
   const [recording, setRecording] = React.useState(false);
   const [elapsedMs, setElapsedMs] = React.useState(0);
   const [recordingSupported] = React.useState(
@@ -196,7 +202,7 @@ export function MessageComposer({
         submit();
       }}
     >
-      {onAttach ? (
+      {onAttach && !editing ? (
         <>
           <input
             ref={fileInputRef}
@@ -242,7 +248,7 @@ export function MessageComposer({
         <>
           <Textarea
             aria-label="Message"
-            placeholder="Type a message"
+            placeholder={editing ? "Edit message" : "Type a message"}
             rows={1}
             value={value}
             disabled={busy}
@@ -251,7 +257,7 @@ export function MessageComposer({
             onBlur={stopTyping}
             className="max-h-40 min-h-10 resize-none"
           />
-          {recordingSupported ? (
+          {recordingSupported && !editing ? (
             <Button
               type="button"
               variant="ghost"
@@ -265,7 +271,7 @@ export function MessageComposer({
             </Button>
           ) : null}
           <Button type="submit" disabled={disabled || value.trim() === ""}>
-            Send
+            {editing ? "Save" : "Send"}
           </Button>
         </>
       )}

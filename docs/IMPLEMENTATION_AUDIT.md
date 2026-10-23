@@ -37,7 +37,7 @@ phases land.
 | 1 | Authentication, Accounts, Profiles | Verified | `000002_users`..`000005_devices` |
 | 2 | Contacts and Presence | Verified | `000006_contacts` |
 | 3 | One-to-One Real-Time Messaging | Verified | `000007_messaging` |
-| 4 | Advanced Messaging | Not started | — (schema placeholders only: `edited_at`, `deleted_at`) |
+| 4 | Advanced Messaging | Verified | `000014_advanced_messaging` |
 | 5 | Groups | Verified | `000008_groups` |
 | 6 | Media, Attachments, and Voice Messages | Verified | `000010_attachments` |
 | 7 | Moments and Social Feed | Verified | `000009_feed`, `000011_moments_features` |
@@ -50,8 +50,8 @@ audit used a drifted numbering: Phase 4 was "Groups, Media, Voice" and Phase 5
 "Moments, Social, Discover", duplicating Phases 6 and 7, and the file claimed
 "there is no Phase 8 in the plan". That was wrong. The master prompt is:
 4 = Advanced Messaging, 5 = Groups, 6 = Media, 7 = Moments, 8 = Discover and
-Global Search, 9 = Calling, 10 = Notifications (12 = mini-apps). **Phase 4 is the
-one unstarted phase below the current work.**
+Global Search, 9 = Calling, 10 = Notifications, 11 = Demo Wallet, 12 = mini-apps.
+**Phases 0–10 are now verified.**
 
 ## Existing files (high level)
 
@@ -93,17 +93,16 @@ one unstarted phase below the current work.**
 
 **Numbering reconciliation.** This list now follows the master prompt (see the
 table above): 4 = Advanced Messaging, 5 = Groups, 6 = Media, 7 = Moments,
-8 = Discover and Global Search, 9 = Calling, 10 = Notifications, 12 = mini-apps.
-Phases 5–10 are Verified; Phase 4 is not started.
+8 = Discover and Global Search, 9 = Calling, 10 = Notifications, 11 = Demo
+Wallet, 12 = mini-apps. Phases 0–10 are Verified.
 
-- **Phase 4 — Advanced Messaging (next):** message edit/delete/reply/forward/
-  react/pin and in-chat search. Schema (`edited_at`, `deleted_at`) and contract
-  placeholders (`message.updated`, `message.deleted`) exist; no write path yet.
+- **Phase 11 — Demo Wallet (next):** demo balance, transfers, and transaction
+  history. Not started; `internal/wallet` and `features/wallet` are empty
+  scaffolding.
 - **Mini-apps (Phase 12):** including the discover mini-app directory and
   mini-app search. `internal/miniapps` and `features/miniapps` are empty
   scaffolding.
-- **Demo wallet.**
-- **Settings, privacy, accessibility.**
+- **Settings, privacy, accessibility (Phase 13).**
 - **Social surface** (`features/social` is empty scaffolding).
 - **Schema hardening and OpenAPI expansion:** the REST contract now covers
   System, Messaging, Media, Moments, Search, Discover, Notifications, and Calls;
@@ -114,12 +113,11 @@ Phases 5–10 are Verified; Phase 4 is not started.
 - **Performance.**
 - **Docs completion.**
 
-Cross-cutting gaps: no `users` package unit tests; message edit/delete write
-path not implemented; notifications are best-effort over the socket (no
-APNs/FCM/email transport); search is substring-only with no ranking or
-full-text index; in-memory rate limiting (not distributed); single-page `sync`
-catch-up; group calls are a peer-to-peer mesh bounded by `CALL_MAX_PARTICIPANTS`
-with no SFU.
+Cross-cutting gaps: no `users` package unit tests; notifications are best-effort
+over the socket (no APNs/FCM/email transport); search is substring-only with no
+ranking or full-text index; in-memory rate limiting (not distributed);
+single-page `sync` catch-up; group calls are a peer-to-peer mesh bounded by
+`CALL_MAX_PARTICIPANTS` with no SFU.
 
 ## Risks/notes
 
@@ -138,10 +136,9 @@ with no SFU.
 
 ## Conclusion
 
-Phases 0, and 1–3 plus 5–10 are complete and verified (Phase 4 — Advanced
-Messaging is the one unstarted phase below the frontier) — see
-`docs/PHASE_STATUS.md` for actual test results. All Go gates
-(build/vet/gofmt/test) and frontend gates (lint/typecheck/tests/build) pass, and
-the live browser E2E suites (`messaging`, `groups`, `moments`, `calls`) pass
-against a real API, database, and browser contexts. The ordered plan for the
-next phase lives in `docs/NEXT_STEPS.md`.
+Phases 0–10 are complete and verified (Phase 11 — Demo Wallet is the next
+unstarted phase) — see `docs/PHASE_STATUS.md` for actual test results. All Go
+gates (build/vet/gofmt/test) and frontend gates (lint/typecheck/tests/build) pass,
+and the live browser E2E suites (`messaging`, `advanced-messaging`, `groups`,
+`moments`, `calls`) pass against a real API, database, and browser contexts. The
+ordered plan for the next phase lives in `docs/NEXT_STEPS.md`.

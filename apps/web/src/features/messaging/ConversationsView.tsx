@@ -2,6 +2,7 @@
 
 import * as React from "react";
 import { Button } from "@/components/ui/Button";
+import { Dialog } from "@/components/ui/Dialog";
 import { Input } from "@/components/ui/Input";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorMessage } from "@/components/ui/ErrorMessage";
@@ -20,8 +21,15 @@ import { MessageComposer } from "@/features/messaging/MessageComposer";
 import { CreateGroupDialog } from "@/features/messaging/CreateGroupDialog";
 import { GroupInfoDialog } from "@/features/messaging/GroupInfoDialog";
 import { ConversationCallButtons } from "@/features/calls/ConversationCallButtons";
-import { applyReceipt, mergeMany, mergeMessage } from "@/features/messaging/thread";
-import { conversationName } from "@/features/messaging/format";
+import { ForwardDialog } from "@/features/messaging/ForwardDialog";
+import {
+  applyPinned,
+  applyReceipt,
+  applyReactions,
+  mergeMany,
+  mergeMessage,
+} from "@/features/messaging/thread";
+import { conversationName, shortTime } from "@/features/messaging/format";
 import type {
   Conversation,
   Member,
@@ -77,11 +85,37 @@ export function ConversationsView() {
   const [uploading, setUploading] = React.useState(false);
   const [uploadProgress, setUploadProgress] = React.useState(0);
 
+  // Advanced messaging (Phase 4): reply/edit/forward/delete/pin/search.
+  const [replyTo, setReplyTo] = React.useState<ThreadMessage | null>(null);
+  const [editing, setEditing] = React.useState<ThreadMessage | null>(null);
+  const [forwardSource, setForwardSource] = React.useState<ThreadMessage | null>(
+    null,
+  );
+  const [forwarding, setForwarding] = React.useState(false);
+  const [deleteTarget, setDeleteTarget] = React.useState<ThreadMessage | null>(
+    null,
+  );
+  const [deleting, setDeleting] = React.useState(false);
+  const [pinsOpen, setPinsOpen] = React.useState(false);
+  const [pins, setPins] = React.useState<Message[] | null>(null);
+  const [pinsLoading, setPinsLoading] = React.useState(false);
+  const [searchOpen, setSearchOpen] = React.useState(false);
+  const [searchQuery, setSearchQuery] = React.useState("");
+  const [searchResults, setSearchResults] = React.useState<Message[] | null>(
+    null,
+  );
+  const [searchNext, setSearchNext] = React.useState<string | null>(null);
+  const [searching, setSearching] = React.useState(false);
+  const [highlightId, setHighlightId] = React.useState<string | null>(null);
+
   // Mirrors read inside stable callbacks so subscriptions never go stale.
   const selectedIdRef = React.useRef<string | null>(null);
   const messagesRef = React.useRef<ThreadMessage[]>([]);
   const currentUserIdRef = React.useRef(currentUserId);
   const infoOpenRef = React.useRef(infoOpen);
+  const pinsOpenRef = React.useRef(pinsOpen);
+  const replyToRef = React.useRef(replyTo);
+  const editingRef = React.useRef(editing);
   const typingTimers = React.useRef(
     new Map<string, ReturnType<typeof setTimeout>>(),
   );
@@ -107,6 +141,15 @@ export function ConversationsView() {
   React.useEffect(() => {
     infoOpenRef.current = infoOpen;
   }, [infoOpen]);
+  React.useEffect(() => {
+    pinsOpenRef.current = pinsOpen;
+  }, [pinsOpen]);
+  React.useEffect(() => {
+    replyToRef.current = replyTo;
+  }, [replyTo]);
+  React.useEffect(() => {
+    editingRef.current = editing;
+  }, [editing]);
   React.useEffect(() => {
     const timers = typingTimers.current;
     return () => {
@@ -253,6 +296,23 @@ export function ConversationsView() {
     [],
   );
 
+  /** Replace the sidebar preview when the message it shows is edited/deleted. */
+  const patchConversationMessage = React.useCallback(
+    (convId: string, message: Message) => {
+      setConversations((prev) => {
+        if (!prev) return prev;
+        const index = prev.findIndex((c) => c.id === convId);
+        if (index < 0 || prev[index].last_message?.id !== message.id) {
+          return prev;
+        }
+        const next = [...prev];
+        next[index] = { ...prev[index], last_message: message };
+        return next;
+      });
+    },
+    [],
+  );
+
   const handleEvent = React.useCallback(
     (event: ServerEvent) => {
       switch (event.type) {
@@ -365,12 +425,51 @@ export function ConversationsView() {
           }
           break;
         }
+        case "message.updated": {
+          if (event.conversation_id === selectedIdRef.current) {
+            setMessages((prev) => mergeMessage(prev, event.message));
+          }
+          patchConversationMessage(event.conversation_id, event.message);
+          break;
+        }
+        case "message.deleted": {
+          if (event.conversation_id === selectedIdRef.current) {
+            setMessages((prev) => mergeMessage(prev, event.message));
+          }
+          patchConversationMessage(event.conversation_id, event.message);
+          break;
+        }
+        case "message.reaction": {
+          if (event.conversation_id === selectedIdRef.current) {
+            setMessages((prev) =>
+              applyReactions(prev, event.message_id, event.reactions),
+            );
+          }
+          break;
+        }
+        case "message.pinned": {
+          if (event.conversation_id === selectedIdRef.current) {
+            setMessages((prev) =>
+              applyPinned(prev, event.message_id, event.pinned),
+            );
+            if (pinsOpenRef.current) {
+              messagingApi.listPins(event.conversation_id).then(
+                (items) => setPins(items),
+                () => {
+                  /* pinned list refresh is best-effort */
+                },
+              );
+            }
+          }
+          break;
+        }
         default:
           break;
       }
     },
     [
       updateConversationOnMessage,
+      patchConversationMessage,
       scheduleMarkRead,
       setTyping,
       applyPresence,
@@ -452,6 +551,16 @@ export function ConversationsView() {
     setThreadError(null);
     setHasMore(false);
     setMembers(null);
+    // Phase 4 view state is per-thread.
+    setReplyTo(null);
+    setEditing(null);
+    setSearchOpen(false);
+    setSearchQuery("");
+    setSearchResults(null);
+    setSearchNext(null);
+    setPinsOpen(false);
+    setPins(null);
+    setHighlightId(null);
     // Opening a thread is a fresh view of it; drop any catch-up cursor.
     syncAfterRef.current.delete(id);
   }, []);
@@ -474,7 +583,7 @@ export function ConversationsView() {
   }, []);
 
   const deliver = React.useCallback(
-    (convId: string, clientMsgId: string, text: string) => {
+    (convId: string, clientMsgId: string, text: string, replyToId?: string) => {
       const sentOverSocket = realtime.send({
         type: "message.send",
         request_id: clientMsgId,
@@ -482,6 +591,7 @@ export function ConversationsView() {
         client_msg_id: clientMsgId,
         message_type: "text",
         content: { text },
+        ...(replyToId ? { reply_to_id: replyToId } : {}),
       });
       if (sentOverSocket) return;
       messagingApi
@@ -489,6 +599,7 @@ export function ConversationsView() {
           client_msg_id: clientMsgId,
           message_type: "text",
           content: { text },
+          ...(replyToId ? { reply_to_id: replyToId } : {}),
         })
         .then((message) => setMessages((prev) => mergeMessage(prev, message)))
         .catch(() => {
@@ -509,6 +620,7 @@ export function ConversationsView() {
       const convId = selectedIdRef.current;
       if (!convId) return;
       const clientMsgId = crypto.randomUUID();
+      const reply = replyToRef.current;
       const optimistic: ThreadMessage = {
         id: `pending:${clientMsgId}`,
         conversation_id: convId,
@@ -521,10 +633,24 @@ export function ConversationsView() {
         created_at: new Date().toISOString(),
         edited_at: null,
         deleted_at: null,
+        reply_to: reply
+          ? {
+              id: reply.id,
+              sender_id: reply.sender_id,
+              message_type: reply.message_type,
+              content: reply.content,
+              deleted: Boolean(reply.deleted_at),
+              text: reply.content.text ?? "",
+            }
+          : null,
+        forwarded_from: null,
+        pinned_at: null,
+        reactions: [],
         pending: true,
       };
       setMessages((prev) => [...prev, optimistic]);
-      deliver(convId, clientMsgId, text);
+      deliver(convId, clientMsgId, text, reply?.id);
+      setReplyTo(null);
     },
     [deliver],
   );
@@ -641,6 +767,251 @@ export function ConversationsView() {
     [realtime],
   );
 
+  // --- Phase 4 actions -------------------------------------------------------
+
+  const loadPins = React.useCallback((convId: string) => {
+    setPinsLoading(true);
+    return messagingApi.listPins(convId).then(
+      (items) => {
+        setPins(items);
+        setPinsLoading(false);
+      },
+      () => {
+        setPins(null);
+        setPinsLoading(false);
+      },
+    );
+  }, []);
+  const loadPinsRef = React.useRef(loadPins);
+  React.useEffect(() => {
+    loadPinsRef.current = loadPins;
+  }, [loadPins]);
+
+  const startReply = React.useCallback((message: ThreadMessage) => {
+    setEditing(null);
+    setReplyTo(message);
+  }, []);
+
+  const startEdit = React.useCallback((message: ThreadMessage) => {
+    setReplyTo(null);
+    setEditing(message);
+  }, []);
+
+  const cancelCompose = React.useCallback(() => {
+    setReplyTo(null);
+    setEditing(null);
+  }, []);
+
+  const submitEdit = React.useCallback(
+    (text: string) => {
+      const convId = selectedIdRef.current;
+      const target = editingRef.current;
+      if (!convId || !target) return;
+      messagingApi.editMessage(convId, target.id, text).then(
+        (updated) => {
+          setMessages((prev) => mergeMessage(prev, updated));
+          setEditing(null);
+        },
+        (cause: unknown) => {
+          toast({
+            title: "Could not edit message",
+            description: cause instanceof ApiError ? cause.message : undefined,
+            variant: "error",
+          });
+          setEditing(null);
+        },
+      );
+    },
+    [toast],
+  );
+
+  const doDelete = React.useCallback(() => {
+    const convId = selectedIdRef.current;
+    const target = deleteTarget;
+    if (!convId || !target) return;
+    setDeleting(true);
+    messagingApi.deleteMessage(convId, target.id).then(
+      (updated) => {
+        setMessages((prev) => mergeMessage(prev, updated));
+        setDeleteTarget(null);
+        setDeleting(false);
+      },
+      (cause: unknown) => {
+        toast({
+          title: "Could not delete message",
+          description: cause instanceof ApiError ? cause.message : undefined,
+          variant: "error",
+        });
+        setDeleteTarget(null);
+        setDeleting(false);
+      },
+    );
+  }, [deleteTarget, toast]);
+
+  const forwardTo = React.useCallback(
+    (targetId: string) => {
+      const source = forwardSource;
+      if (!source) return;
+      setForwarding(true);
+      messagingApi
+        .forwardMessage(targetId, {
+          source_conversation_id: source.conversation_id,
+          message_id: source.id,
+        })
+        .then(
+          () => {
+            if (targetId === selectedIdRef.current) {
+              // The socket also delivers it; merging keeps the thread instant.
+              void messagingApi
+                .listMessages(targetId, { limit: 1 })
+                .then((page) => {
+                  const latest = page.items[0];
+                  if (latest) setMessages((prev) => mergeMessage(prev, latest));
+                })
+                .catch(() => {
+                  /* the socket event will deliver it */
+                });
+            }
+            setForwardSource(null);
+            toast({ title: "Message forwarded", variant: "success" });
+          },
+          (cause: unknown) => {
+            toast({
+              title: "Could not forward message",
+              description: cause instanceof ApiError ? cause.message : undefined,
+              variant: "error",
+            });
+          },
+        )
+        .finally(() => setForwarding(false));
+    },
+    [forwardSource, toast],
+  );
+
+  const toggleReact = React.useCallback(
+    (message: ThreadMessage, emoji: string) => {
+      const convId = selectedIdRef.current;
+      if (!convId) return;
+      const mine =
+        message.reactions?.find((r) => r.emoji === emoji)?.mine ?? false;
+      const request = mine
+        ? messagingApi.removeReaction(convId, message.id, emoji)
+        : messagingApi.addReaction(convId, message.id, emoji);
+      request.then(
+        (res) =>
+          setMessages((prev) => applyReactions(prev, message.id, res.reactions)),
+        (cause: unknown) => {
+          toast({
+            title: "Could not update reaction",
+            description: cause instanceof ApiError ? cause.message : undefined,
+            variant: "error",
+          });
+        },
+      );
+    },
+    [toast],
+  );
+
+  const togglePin = React.useCallback(
+    (message: ThreadMessage, pinned: boolean) => {
+      const convId = selectedIdRef.current;
+      if (!convId) return;
+      const request = pinned
+        ? messagingApi.pinMessage(convId, message.id)
+        : messagingApi.unpinMessage(convId, message.id);
+      request.then(
+        () => {
+          setMessages((prev) => applyPinned(prev, message.id, pinned));
+          if (pinsOpenRef.current) void loadPinsRef.current(convId);
+        },
+        (cause: unknown) => {
+          toast({
+            title: pinned ? "Could not pin message" : "Could not unpin message",
+            description: cause instanceof ApiError ? cause.message : undefined,
+            variant: "error",
+          });
+        },
+      );
+    },
+    [toast],
+  );
+
+  const togglePinsPanel = React.useCallback(() => {
+    const convId = selectedIdRef.current;
+    if (!convId) return;
+    if (pinsOpenRef.current) {
+      setPinsOpen(false);
+      return;
+    }
+    setPinsOpen(true);
+    void loadPinsRef.current(convId);
+  }, []);
+
+  const runSearch = React.useCallback(
+    (event: React.FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      const convId = selectedIdRef.current;
+      const query = searchQuery.trim();
+      if (!convId || !query) return;
+      setSearching(true);
+      messagingApi.searchMessages(convId, query, { limit: 30 }).then(
+        (page) => {
+          setSearchResults(page.items);
+          setSearchNext(page.next_cursor ?? null);
+          setSearching(false);
+        },
+        (cause: unknown) => {
+          setSearching(false);
+          toast({
+            title: "Search failed",
+            description: cause instanceof ApiError ? cause.message : undefined,
+            variant: "error",
+          });
+        },
+      );
+    },
+    [searchQuery, toast],
+  );
+
+  const loadMoreSearch = React.useCallback(() => {
+    const convId = selectedIdRef.current;
+    const query = searchQuery.trim();
+    const before = searchNext ? Number(searchNext) : 0;
+    if (!convId || !query || !before) return;
+    setSearching(true);
+    messagingApi
+      .searchMessages(convId, query, { limit: 30, before })
+      .then(
+        (page) => {
+          setSearchResults((prev) => [...(prev ?? []), ...page.items]);
+          setSearchNext(page.next_cursor ?? null);
+          setSearching(false);
+        },
+        () => setSearching(false),
+      );
+  }, [searchQuery, searchNext]);
+
+  const jumpToMessage = React.useCallback(
+    (messageId: string) => {
+      const element = document.getElementById(`message-${messageId}`);
+      if (!element) {
+        toast({
+          title: "Message not loaded",
+          description: "Load older messages to see it in the thread.",
+          variant: "info",
+        });
+        return;
+      }
+      element.scrollIntoView({ block: "center" });
+      setHighlightId(messageId);
+      window.setTimeout(
+        () => setHighlightId((current) => (current === messageId ? null : current)),
+        2500,
+      );
+    },
+    [toast],
+  );
+
   const openConversation = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setOpenFields({});
@@ -702,6 +1073,19 @@ export function ConversationsView() {
     selected?.kind === "group" && members
       ? Object.fromEntries(members.map((m) => [m.id, m.display_name]))
       : undefined;
+
+  // Group owners/admins may moderate; in a direct chat both members may.
+  const myRole =
+    selected?.kind === "group" && members
+      ? members.find((m) => m.id === currentUserId)?.role
+      : undefined;
+  const isGroupModerator = myRole === "owner" || myRole === "admin";
+  const canPin = Boolean(
+    selected && (selected.kind === "direct" || isGroupModerator),
+  );
+  const canDeleteOthers = Boolean(
+    selected && selected.kind === "group" && isGroupModerator,
+  );
 
   return (
     <div className="grid gap-4 md:grid-cols-[20rem_1fr]">
@@ -778,17 +1162,114 @@ export function ConversationsView() {
                   <span className="text-ink-muted text-xs">offline</span>
                 )}
               </div>
-              <ConversationCallButtons conversation={selected} />
-              {selected.kind === "group" ? (
+              <div className="flex items-center gap-1">
                 <Button
                   variant="ghost"
                   size="sm"
-                  onClick={() => setInfoOpen(true)}
+                  aria-pressed={searchOpen}
+                  onClick={() => setSearchOpen((open) => !open)}
                 >
-                  Group info
+                  {searchOpen ? "Close search" : "Search"}
                 </Button>
-              ) : null}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  aria-pressed={pinsOpen}
+                  onClick={togglePinsPanel}
+                >
+                  Pinned
+                </Button>
+                <ConversationCallButtons conversation={selected} />
+                {selected.kind === "group" ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setInfoOpen(true)}
+                  >
+                    Group info
+                  </Button>
+                ) : null}
+              </div>
             </header>
+
+            {searchOpen ? (
+              <div className="border-border-subtle border-b p-3">
+                <form onSubmit={runSearch} className="flex items-center gap-2">
+                  <Input
+                    id="message-search"
+                    value={searchQuery}
+                    placeholder="Search this conversation"
+                    autoComplete="off"
+                    aria-label="Search messages in this conversation"
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                  />
+                  <Button type="submit" size="sm" loading={searching}>
+                    Search messages
+                  </Button>
+                </form>
+                {searchResults === null ? null : searchResults.length === 0 ? (
+                  <p className="text-ink-muted mt-2 text-xs">
+                    No messages match “{searchQuery.trim()}”.
+                  </p>
+                ) : (
+                  <ul className="mt-2 flex max-h-40 flex-col gap-1 overflow-y-auto">
+                    {searchResults.map((result) => (
+                      <li key={result.id}>
+                        <button
+                          type="button"
+                          onClick={() => jumpToMessage(result.id)}
+                          className="hover:bg-surface-muted w-full rounded px-2 py-1 text-left text-xs"
+                        >
+                          <span className="text-ink-muted">
+                            {shortTime(result.created_at)}
+                          </span>{" "}
+                          <span className="text-ink">
+                            {result.content.text || "(no text)"}
+                          </span>
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {searchNext ? (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    loading={searching}
+                    onClick={loadMoreSearch}
+                  >
+                    More results
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
+
+            {pinsOpen ? (
+              <div className="border-border-subtle border-b p-3">
+                <p className="text-ink text-sm font-medium">Pinned messages</p>
+                {pinsLoading ? (
+                  <p className="text-ink-muted mt-1 text-xs">Loading…</p>
+                ) : pins && pins.length > 0 ? (
+                  <ul className="mt-1 flex max-h-40 flex-col gap-1 overflow-y-auto">
+                    {pins.map((pin) => (
+                      <li key={pin.id}>
+                        <button
+                          type="button"
+                          onClick={() => jumpToMessage(pin.id)}
+                          className="hover:bg-surface-muted w-full rounded px-2 py-1 text-left text-xs text-ink"
+                        >
+                          {pin.content.text || "(no text)"}
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                ) : (
+                  <p className="text-ink-muted mt-1 text-xs">
+                    Nothing pinned yet.
+                  </p>
+                )}
+              </div>
+            ) : null}
 
             {threadError ? (
               <div className="p-4">
@@ -810,7 +1291,17 @@ export function ConversationsView() {
                     : null
                 }
                 senderNames={senderNames}
+                canPin={canPin}
+                canDeleteOthers={canDeleteOthers}
+                highlightId={highlightId}
                 onRetry={retryMessage}
+                onReply={startReply}
+                onEdit={startEdit}
+                onDelete={(message) => setDeleteTarget(message)}
+                onForward={(message) => setForwardSource(message)}
+                onReact={toggleReact}
+                onTogglePin={togglePin}
+                onJumpTo={jumpToMessage}
               />
             )}
 
@@ -828,6 +1319,20 @@ export function ConversationsView() {
             ) : null}
 
             <div className="border-border-subtle border-t p-3">
+              {replyTo || editing ? (
+                <div className="mb-2 flex items-center justify-between gap-2 text-xs">
+                  <span className="text-ink-muted truncate">
+                    {editing
+                      ? "Editing message"
+                      : `Replying to ${
+                          senderNames?.[replyTo?.sender_id ?? ""] ?? "message"
+                        }`}
+                  </span>
+                  <Button variant="ghost" size="sm" onClick={cancelCompose}>
+                    Cancel
+                  </Button>
+                </div>
+              ) : null}
               {uploading ? (
                 <div className="mb-2">
                   <div className="mb-1 flex items-center justify-between text-xs text-ink-muted">
@@ -838,8 +1343,11 @@ export function ConversationsView() {
                 </div>
               ) : null}
               <MessageComposer
+                key={editing ? `edit:${editing.id}` : "compose"}
+                editing={Boolean(editing)}
+                initialValue={editing?.content.text ?? ""}
                 uploading={uploading}
-                onSend={sendText}
+                onSend={editing ? submitEdit : sendText}
                 onTyping={sendTyping}
                 onAttach={handleAttach}
                 onAttachError={handleAttachError}
@@ -889,6 +1397,47 @@ export function ConversationsView() {
             setMessages([]);
           }}
         />
+      ) : null}
+
+      {forwardSource ? (
+        <ForwardDialog
+          open
+          conversations={conversations}
+          sourceId={forwardSource.conversation_id}
+          busy={forwarding}
+          onClose={() => setForwardSource(null)}
+          onForward={forwardTo}
+        />
+      ) : null}
+
+      {deleteTarget ? (
+        <Dialog
+          open
+          onClose={() => setDeleteTarget(null)}
+          title="Delete message"
+          description="The message is removed for everyone in this conversation."
+          footer={
+            <>
+              <Button
+                variant="secondary"
+                type="button"
+                onClick={() => setDeleteTarget(null)}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                type="button"
+                loading={deleting}
+                onClick={doDelete}
+              >
+                Delete
+              </Button>
+            </>
+          }
+        >
+          <p className="text-ink-muted text-sm">This cannot be undone.</p>
+        </Dialog>
       ) : null}
     </div>
   );

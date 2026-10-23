@@ -78,3 +78,33 @@ export function applyReceipt(
     return { ...message, status };
   });
 }
+
+/**
+ * Replace a message's reaction set (from a `message.reaction` event or a
+ * reaction REST response). No-op when the message is not in the thread.
+ */
+export function applyReactions(
+  list: ThreadMessage[],
+  messageId: string,
+  reactions: ThreadMessage["reactions"],
+): ThreadMessage[] {
+  return list.map((message) =>
+    message.id === messageId ? { ...message, reactions } : message,
+  );
+}
+
+/**
+ * Apply a pin/unpin. The event carries only a boolean, so the pinned timestamp
+ * is approximated client-side; it is only used to show the pin badge.
+ */
+export function applyPinned(
+  list: ThreadMessage[],
+  messageId: string,
+  pinned: boolean,
+): ThreadMessage[] {
+  return list.map((message) =>
+    message.id === messageId
+      ? { ...message, pinned_at: pinned ? new Date().toISOString() : null }
+      : message,
+  );
+}

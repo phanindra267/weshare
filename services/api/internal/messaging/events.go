@@ -15,6 +15,11 @@ const (
 	// Group lifecycle events (Phase 4).
 	EventConversationUpdated = "conversation.updated"
 	EventMemberChanged       = "member.changed"
+	// Advanced-messaging events (Phase 4).
+	EventMessageUpdated  = "message.updated"
+	EventMessageDeleted  = "message.deleted"
+	EventMessageReaction = "message.reaction"
+	EventMessagePinned   = "message.pinned"
 )
 
 // Client-originated event types accepted on the realtime socket.
@@ -124,4 +129,39 @@ type MemberChangedEvent struct {
 	UserID         string `json:"user_id"`
 	Role           string `json:"role"`
 	Action         string `json:"action"`
+}
+
+// MessageUpdatedEvent announces an edit to a message's body.
+type MessageUpdatedEvent struct {
+	Type           string          `json:"type"`
+	ConversationID string          `json:"conversation_id"`
+	Message        MessageResponse `json:"message"`
+}
+
+// MessageDeletedEvent announces that a message was tombstoned. The embedded
+// message carries the redacted (deleted) representation.
+type MessageDeletedEvent struct {
+	Type           string          `json:"type"`
+	ConversationID string          `json:"conversation_id"`
+	MessageID      string          `json:"message_id"`
+	Message        MessageResponse `json:"message"`
+}
+
+// MessageReactionEvent reports the full reaction set for one message after a
+// change, so clients can replace rather than reconcile.
+type MessageReactionEvent struct {
+	Type           string             `json:"type"`
+	ConversationID string             `json:"conversation_id"`
+	MessageID      string             `json:"message_id"`
+	ActorID        string             `json:"actor_id"`
+	Reactions      []ReactionResponse `json:"reactions"`
+}
+
+// MessagePinnedEvent reports a pin or unpin of a message.
+type MessagePinnedEvent struct {
+	Type           string `json:"type"`
+	ConversationID string `json:"conversation_id"`
+	MessageID      string `json:"message_id"`
+	ActorID        string `json:"actor_id"`
+	Pinned         bool   `json:"pinned"`
 }

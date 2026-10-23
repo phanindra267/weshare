@@ -61,6 +61,10 @@ Suites:
 
 - `e2e/messaging.spec.ts` — two users become contacts, open a direct chat, and
   exchange messages live over the realtime WebSocket (presence + read receipt).
+- `e2e/advanced-messaging.spec.ts` — the Phase 4 chat power features in one
+  continuous two-browser flow: send, edit (edited marker), react (aggregate
+  reaches the peer live), pin, reply (quoted message), forward into a group,
+  in-chat search, and delete (tombstone on both sides).
 - `e2e/groups.spec.ts` — three users form a group, an image is shared live to
   another member, the member sees the group panel without admin tools, and a
   non-member receives `404` when reading the group's history.

@@ -406,16 +406,20 @@ type InsertMessageParams struct {
 	ClientMsgID    *string
 	MessageType    string
 	Content        json.RawMessage
+	// Phase 4: optional reply/forward provenance.
+	ReplyToID     *uuid.UUID
+	ForwardedFrom *uuid.UUID
 }
 
 const messageColumns = `id, conversation_id, sender_id, sequence_no,
-	client_msg_id, message_type, content, created_at, edited_at, deleted_at`
+	client_msg_id, message_type, content, created_at, edited_at, deleted_at,
+	reply_to_id, forwarded_from, pinned_at`
 
 func scanMessage(row pgx.Row) (Message, error) {
 	var m Message
 	err := row.Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.SequenceNo,
 		&m.ClientMsgID, &m.MessageType, &m.Content, &m.CreatedAt,
-		&m.EditedAt, &m.DeletedAt)
+		&m.EditedAt, &m.DeletedAt, &m.ReplyToID, &m.ForwardedFrom, &m.PinnedAt)
 	return m, err
 }
 
@@ -457,12 +461,13 @@ func (st *Store) InsertMessage(ctx context.Context, p InsertMessageParams) (Mess
 
 	msg, err := scanMessage(tx.QueryRow(ctx, `
 		INSERT INTO messages
-			(conversation_id, sender_id, sequence_no, client_msg_id, message_type, content)
-		VALUES ($1, $2, $3, $4, $5, $6)
+			(conversation_id, sender_id, sequence_no, client_msg_id, message_type, content, reply_to_id, forwarded_from)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		ON CONFLICT (sender_id, client_msg_id) WHERE client_msg_id IS NOT NULL
 		DO NOTHING
 		RETURNING `+messageColumns,
-		p.ConversationID, p.SenderID, seq, p.ClientMsgID, p.MessageType, p.Content))
+		p.ConversationID, p.SenderID, seq, p.ClientMsgID, p.MessageType, p.Content,
+		p.ReplyToID, p.ForwardedFrom))
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Concurrent retry with the same idempotency key won. The caller's
 		// sequence allocation is discarded with the transaction.
@@ -519,6 +524,7 @@ type MessageQuery struct {
 const messageListSelect = `
 	SELECT m.id, m.conversation_id, m.sender_id, m.sequence_no, m.client_msg_id,
 	       m.message_type, m.content, m.created_at, m.edited_at, m.deleted_at,
+	       m.reply_to_id, m.forwarded_from, m.pinned_at,
 	       CASE
 	         WHEN m.sender_id = $2 THEN
 	           CASE
@@ -547,6 +553,48 @@ const messageListSelect = `
 	ORDER BY m.sequence_no DESC
 	LIMIT $5`
 
+// messageSearchStatusCase is the viewer-relative status CASE used by the
+// in-chat search query (a copy of the history CASE; kept separate so the hot
+// history path is not disturbed).
+const messageSearchStatusCase = `CASE
+	WHEN m.sender_id = $2 THEN
+	  CASE
+	    WHEN COALESCE(peer.last_read_sequence, 0) >= m.sequence_no THEN '` + StatusRead + `'
+	    WHEN COALESCE(peer.last_delivered_sequence, 0) >= m.sequence_no THEN '` + StatusDelivered + `'
+	    ELSE '` + StatusSent + `'
+	  END
+	ELSE
+	  CASE
+	    WHEN me.last_read_sequence >= m.sequence_no THEN '` + StatusRead + `'
+	    ELSE '` + StatusReceived + `'
+	  END
+	END`
+
+// messageSearchSelect finds text messages whose body matches an ILIKE pattern,
+// newest first, for in-chat search. Arguments: $1 conversation, $2 viewer,
+// $3 ILIKE pattern, $4 before cursor (nullable), $5 limit.
+const messageSearchSelect = `
+	SELECT m.id, m.conversation_id, m.sender_id, m.sequence_no, m.client_msg_id,
+	       m.message_type, m.content, m.created_at, m.edited_at, m.deleted_at,
+	       m.reply_to_id, m.forwarded_from, m.pinned_at,
+	       ` + messageSearchStatusCase + `
+	FROM messages m
+	JOIN conversation_members me
+	  ON me.conversation_id = m.conversation_id AND me.user_id = $2
+	LEFT JOIN LATERAL (
+	  SELECT om.last_read_sequence, om.last_delivered_sequence
+	  FROM conversation_members om
+	  WHERE om.conversation_id = m.conversation_id AND om.user_id <> $2
+	  LIMIT 1
+	) peer ON TRUE
+	WHERE m.conversation_id = $1
+	  AND m.deleted_at IS NULL
+	  AND m.message_type = '` + MessageTypeText + `'
+	  AND m.content->>'text' ILIKE $3 ESCAPE '\'
+	  AND ($4::bigint IS NULL OR m.sequence_no < $4::bigint)
+	ORDER BY m.sequence_no DESC
+	LIMIT $5`
+
 func scanMessageRow(row pgx.Row) (Message, string, error) {
 	var (
 		m      Message
@@ -554,7 +602,7 @@ func scanMessageRow(row pgx.Row) (Message, string, error) {
 	)
 	err := row.Scan(&m.ID, &m.ConversationID, &m.SenderID, &m.SequenceNo,
 		&m.ClientMsgID, &m.MessageType, &m.Content, &m.CreatedAt,
-		&m.EditedAt, &m.DeletedAt, &status)
+		&m.EditedAt, &m.DeletedAt, &m.ReplyToID, &m.ForwardedFrom, &m.PinnedAt, &status)
 	if err != nil {
 		return Message{}, "", err
 	}
@@ -962,4 +1010,185 @@ func (st *Store) LeaveGroup(ctx context.Context, id, userID uuid.UUID) (deleted 
 		return false, nil, fmt.Errorf("commit tx: %w", err)
 	}
 	return false, newOwner, nil
+}
+
+// --- advanced messaging (Phase 4) -------------------------------------------
+
+// MessageFor loads one message scoped to a conversation, so an action on a
+// message id cannot reach across conversations.
+func (st *Store) MessageFor(ctx context.Context, conversationID, messageID uuid.UUID) (Message, error) {
+	m, err := scanMessage(st.db.Pool.QueryRow(ctx,
+		`SELECT `+messageColumns+` FROM messages WHERE id = $1 AND conversation_id = $2`,
+		messageID, conversationID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Message{}, ErrMessageNotFound
+	}
+	if err != nil {
+		return Message{}, fmt.Errorf("message for: %w", err)
+	}
+	return m, nil
+}
+
+// MessagesByIDs batch-loads messages by id; it hydrates reply previews.
+func (st *Store) MessagesByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]Message, error) {
+	out := make(map[uuid.UUID]Message, len(ids))
+	if len(ids) == 0 {
+		return out, nil
+	}
+	rows, err := st.db.Pool.Query(ctx,
+		`SELECT `+messageColumns+` FROM messages WHERE id = ANY($1::uuid[])`, ids)
+	if err != nil {
+		return nil, fmt.Errorf("messages by ids: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan message: %w", err)
+		}
+		out[m.ID] = m
+	}
+	return out, rows.Err()
+}
+
+// EditMessage rewrites a message's content and stamps edited_at. Already
+// deleted messages cannot be edited.
+func (st *Store) EditMessage(ctx context.Context, messageID uuid.UUID, content json.RawMessage, editedAt time.Time) (Message, error) {
+	m, err := scanMessage(st.db.Pool.QueryRow(ctx, `
+		UPDATE messages SET content = $2, edited_at = $3
+		WHERE id = $1 AND deleted_at IS NULL
+		RETURNING `+messageColumns, messageID, content, editedAt))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Message{}, ErrMessageNotFound
+	}
+	if err != nil {
+		return Message{}, fmt.Errorf("edit message: %w", err)
+	}
+	return m, nil
+}
+
+// SoftDeleteMessage tombstones a message: it is marked deleted and its content
+// is scrubbed so the body is not recoverable through the API.
+func (st *Store) SoftDeleteMessage(ctx context.Context, messageID uuid.UUID, deletedAt time.Time) error {
+	tag, err := st.db.Pool.Exec(ctx, `
+		UPDATE messages SET deleted_at = $2, content = '{}'::jsonb
+		WHERE id = $1 AND deleted_at IS NULL`, messageID, deletedAt)
+	if err != nil {
+		return fmt.Errorf("delete message: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrMessageNotFound
+	}
+	return nil
+}
+
+// AddReaction records a reaction, ignoring a repeat of the same emoji by the
+// same user. It reports whether a new row was written.
+func (st *Store) AddReaction(ctx context.Context, messageID, userID uuid.UUID, emoji string) (bool, error) {
+	tag, err := st.db.Pool.Exec(ctx, `
+		INSERT INTO message_reactions (message_id, user_id, emoji)
+		VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`, messageID, userID, emoji)
+	if err != nil {
+		return false, fmt.Errorf("add reaction: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// RemoveReaction removes a reaction, reporting whether it existed.
+func (st *Store) RemoveReaction(ctx context.Context, messageID, userID uuid.UUID, emoji string) (bool, error) {
+	tag, err := st.db.Pool.Exec(ctx, `
+		DELETE FROM message_reactions
+		WHERE message_id = $1 AND user_id = $2 AND emoji = $3`, messageID, userID, emoji)
+	if err != nil {
+		return false, fmt.Errorf("remove reaction: %w", err)
+	}
+	return tag.RowsAffected() > 0, nil
+}
+
+// ReactionsFor batch-loads reactions for a page of messages, keyed by message.
+func (st *Store) ReactionsFor(ctx context.Context, messageIDs []uuid.UUID) (map[uuid.UUID][]Reaction, error) {
+	out := make(map[uuid.UUID][]Reaction, len(messageIDs))
+	if len(messageIDs) == 0 {
+		return out, nil
+	}
+	rows, err := st.db.Pool.Query(ctx, `
+		SELECT message_id, user_id, emoji FROM message_reactions
+		WHERE message_id = ANY($1::uuid[])
+		ORDER BY created_at`, messageIDs)
+	if err != nil {
+		return nil, fmt.Errorf("reactions for: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r Reaction
+		if err := rows.Scan(&r.MessageID, &r.UserID, &r.Emoji); err != nil {
+			return nil, fmt.Errorf("scan reaction: %w", err)
+		}
+		out[r.MessageID] = append(out[r.MessageID], r)
+	}
+	return out, rows.Err()
+}
+
+// PinMessage sets (or, with a nil timestamp, clears) a message's pinned_at.
+func (st *Store) PinMessage(ctx context.Context, messageID uuid.UUID, pinnedAt *time.Time) error {
+	tag, err := st.db.Pool.Exec(ctx,
+		`UPDATE messages SET pinned_at = $2 WHERE id = $1`, messageID, pinnedAt)
+	if err != nil {
+		return fmt.Errorf("pin message: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrMessageNotFound
+	}
+	return nil
+}
+
+// PinnedMessages lists a conversation's pinned messages, oldest pin first.
+func (st *Store) PinnedMessages(ctx context.Context, conversationID uuid.UUID) ([]Message, error) {
+	rows, err := st.db.Pool.Query(ctx,
+		`SELECT `+messageColumns+` FROM messages
+		 WHERE conversation_id = $1 AND pinned_at IS NOT NULL AND deleted_at IS NULL
+		 ORDER BY pinned_at`, conversationID)
+	if err != nil {
+		return nil, fmt.Errorf("pinned messages: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Message, 0)
+	for rows.Next() {
+		m, err := scanMessage(rows)
+		if err != nil {
+			return nil, fmt.Errorf("scan pinned: %w", err)
+		}
+		out = append(out, m)
+	}
+	return out, rows.Err()
+}
+
+// SearchMessages finds text messages in a conversation matching a plain-text
+// query, newest first, with an optional `before` cursor for paging. It reports
+// whether older matches remain.
+func (st *Store) SearchMessages(ctx context.Context, conversationID, viewer uuid.UUID, pattern string, before *int64, limit int) ([]Message, bool, error) {
+	rows, err := st.db.Pool.Query(ctx, messageSearchSelect,
+		conversationID, viewer, pattern, before, limit)
+	if err != nil {
+		return nil, false, fmt.Errorf("search messages: %w", err)
+	}
+	defer rows.Close()
+
+	desc := make([]Message, 0, limit)
+	for rows.Next() {
+		m, _, err := scanMessageRow(rows)
+		if err != nil {
+			return nil, false, fmt.Errorf("scan search result: %w", err)
+		}
+		desc = append(desc, m)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, false, fmt.Errorf("iterate search results: %w", err)
+	}
+	hasMore := len(desc) == limit
+	out := make([]Message, 0, len(desc))
+	for i := len(desc) - 1; i >= 0; i-- {
+		out = append(out, desc[i])
+	}
+	return out, hasMore, nil
 }

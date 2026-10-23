@@ -7,6 +7,7 @@ import type {
   CreateGroupInput,
   Member,
   Message,
+  MessageReaction,
   SendMessageInput,
   UpdateGroupInput,
 } from "@/features/messaging/types";
@@ -70,6 +71,67 @@ export const messagingApi = {
     api.post<{ unread_count: number }>(`/api/v1/conversations/${id}/read`, {
       json: { sequence_no: sequenceNo },
     }),
+
+  // --- advanced messaging (Phase 4) ------------------------------------------
+
+  /** Edit one of your own text messages. */
+  editMessage: (id: string, messageId: string, text: string) =>
+    api.patch<Message>(`/api/v1/conversations/${id}/messages/${messageId}`, {
+      json: { text },
+    }),
+
+  /** Delete a message (your own, or any in a group you moderate). */
+  deleteMessage: (id: string, messageId: string) =>
+    api.delete<Message>(`/api/v1/conversations/${id}/messages/${messageId}`),
+
+  /** Copy a message from another conversation into this one. */
+  forwardMessage: (
+    id: string,
+    input: { source_conversation_id: string; message_id: string },
+  ) =>
+    api.post<Message>(`/api/v1/conversations/${id}/messages/forward`, {
+      json: input,
+    }),
+
+  /** Add an emoji reaction; the response is the new aggregate. */
+  addReaction: (id: string, messageId: string, emoji: string) =>
+    api.put<{ message_id: string; reactions: MessageReaction[] }>(
+      `/api/v1/conversations/${id}/messages/${messageId}/reactions`,
+      { json: { emoji } },
+    ),
+
+  /** Remove one of your own reactions. */
+  removeReaction: (id: string, messageId: string, emoji: string) =>
+    api.delete<{ message_id: string; reactions: MessageReaction[] }>(
+      `/api/v1/conversations/${id}/messages/${messageId}/reactions?emoji=${encodeURIComponent(emoji)}`,
+    ),
+
+  pinMessage: (id: string, messageId: string) =>
+    api.put<void>(`/api/v1/conversations/${id}/messages/${messageId}/pin`),
+
+  unpinMessage: (id: string, messageId: string) =>
+    api.delete<void>(`/api/v1/conversations/${id}/messages/${messageId}/pin`),
+
+  /** List a conversation's pinned messages. */
+  listPins: (id: string): Promise<Message[]> =>
+    api
+      .get<{ messages: Message[] }>(`/api/v1/conversations/${id}/pins`)
+      .then((res) => res.messages ?? []),
+
+  /** Search text messages within a conversation. */
+  searchMessages: (
+    id: string,
+    query: string,
+    params?: { limit?: number; before?: number },
+  ) => {
+    const search = new URLSearchParams({ q: query });
+    if (params?.limit) search.set("limit", String(params.limit));
+    if (params?.before !== undefined)
+      search.set("before", String(params.before));
+    return api.get<Paginated<Message>>(
+      `/api/v1/conversations/${id}/messages/search?${search.toString()}`,
+    );
+  },
 
   // --- groups ---------------------------------------------------------------
 

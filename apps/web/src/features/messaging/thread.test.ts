@@ -1,5 +1,11 @@
 import { describe, it, expect } from "vitest";
-import { applyReceipt, mergeMany, mergeMessage } from "@/features/messaging/thread";
+import {
+  applyPinned,
+  applyReceipt,
+  applyReactions,
+  mergeMany,
+  mergeMessage,
+} from "@/features/messaging/thread";
 import type { Message, ThreadMessage } from "@/features/messaging/types";
 
 function message(overrides: Partial<Message> = {}): Message {
@@ -15,6 +21,10 @@ function message(overrides: Partial<Message> = {}): Message {
     created_at: "2026-01-01T00:00:00Z",
     edited_at: null,
     deleted_at: null,
+    reply_to: null,
+    forwarded_from: null,
+    pinned_at: null,
+    reactions: [],
     ...overrides,
   };
 }
@@ -99,5 +109,47 @@ describe("applyReceipt", () => {
     const result = applyReceipt(list, "me", 999, "read");
     expect(result[0].pending).toBe(true);
     expect(result[0].status).toBe("sent");
+  });
+});
+
+describe("applyReactions", () => {
+  it("replaces the reaction set of the target message", () => {
+    const list: ThreadMessage[] = [
+      { ...message({ id: "a" }) },
+      { ...message({ id: "b" }) },
+    ];
+    const reactions = [
+      { emoji: "👍", count: 2, mine: true, users: ["me", "peer"] },
+    ];
+    const result = applyReactions(list, "a", reactions);
+    expect(result[0].reactions).toEqual(reactions);
+    expect(result[1].reactions).toEqual([]);
+  });
+
+  it("is a no-op when the message is not in the thread", () => {
+    const list: ThreadMessage[] = [{ ...message({ id: "a" }) }];
+    const result = applyReactions(list, "missing", [
+      { emoji: "🎉", count: 1, mine: false, users: ["peer"] },
+    ]);
+    expect(result).toEqual(list);
+  });
+});
+
+describe("applyPinned", () => {
+  it("sets and clears the pinned timestamp", () => {
+    const list: ThreadMessage[] = [{ ...message({ id: "a" }) }];
+    const pinned = applyPinned(list, "a", true);
+    expect(pinned[0].pinned_at).not.toBeNull();
+    const unpinned = applyPinned(pinned, "a", false);
+    expect(unpinned[0].pinned_at).toBeNull();
+  });
+
+  it("leaves other messages untouched", () => {
+    const list: ThreadMessage[] = [
+      { ...message({ id: "a" }) },
+      { ...message({ id: "b" }) },
+    ];
+    const result = applyPinned(list, "a", true);
+    expect(result[1].pinned_at).toBeNull();
   });
 });

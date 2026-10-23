@@ -44,6 +44,31 @@ var (
 	ErrNotConnected = errors.New("not connected")
 	// ErrOwnerImmutable is returned when an action would change the owner.
 	ErrOwnerImmutable = errors.New("the owner cannot be changed this way")
+	// ErrMessageNotFound is returned when a message id does not resolve within
+	// a conversation (Phase 4).
+	ErrMessageNotFound = errors.New("message not found")
+	// ErrEditWindowClosed is returned when editing a message after the allowed
+	// window has elapsed (Phase 4).
+	ErrEditWindowClosed = errors.New("this message can no longer be edited")
+	// ErrNotEditableType is returned when editing a message whose type has no
+	// editable body (media and system messages) (Phase 4).
+	ErrNotEditableType = errors.New("this message cannot be edited")
+	// ErrCannotEditDeleted is returned when editing an already deleted message.
+	ErrCannotEditDeleted = errors.New("this message was deleted")
+	// ErrCannotForwardDeleted is returned when forwarding a deleted message.
+	ErrCannotForwardDeleted = errors.New("this message was deleted")
+	// ErrNotReactable is returned when reacting to a message that cannot carry
+	// reactions (system messages).
+	ErrNotReactable = errors.New("this message cannot be reacted to")
+	// ErrEmptySearch is returned when an in-chat search query is empty.
+	ErrEmptySearch = errors.New("search query is empty")
+	// ErrInvalidEmoji is returned when a reaction emoji is out of bounds.
+	ErrInvalidEmoji = errors.New("invalid reaction")
+	// ErrPinForbidden is returned when the caller's role does not permit
+	// pinning in a group.
+	ErrPinForbidden = errors.New("not permitted to pin messages")
+	// ErrNotForwardable is returned when forwarding a system message.
+	ErrNotForwardable = errors.New("this message cannot be forwarded")
 )
 
 // Conversation kinds.

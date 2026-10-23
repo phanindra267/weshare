@@ -42,7 +42,16 @@ func (h *Handler) RegisterRoutes(rg *gin.RouterGroup, requireAuth gin.HandlerFun
 	g.GET("/:id", h.GetConversation)
 	g.PATCH("/:id", h.UpdateGroup)
 	g.GET("/:id/messages", h.ListMessages)
+	g.GET("/:id/messages/search", h.SearchMessages)
 	g.POST("/:id/messages", h.sendRateLimit(), h.SendMessage)
+	g.POST("/:id/messages/forward", h.sendRateLimit(), h.ForwardMessage)
+	g.PATCH("/:id/messages/:messageId", h.EditMessage)
+	g.DELETE("/:id/messages/:messageId", h.DeleteMessage)
+	g.PUT("/:id/messages/:messageId/pin", h.PinMessage)
+	g.DELETE("/:id/messages/:messageId/pin", h.UnpinMessage)
+	g.PUT("/:id/messages/:messageId/reactions", h.AddReaction)
+	g.DELETE("/:id/messages/:messageId/reactions", h.RemoveReaction)
+	g.GET("/:id/pins", h.ListPins)
 	g.POST("/:id/read", h.MarkRead)
 	g.GET("/:id/members", h.GetMembers)
 	g.POST("/:id/members", h.AddMembers)
@@ -83,8 +92,21 @@ func writeError(c *gin.Context, err error, notFoundMessage string) {
 		httpx.Error(c, httpx.NotFound(notFoundMessage))
 	case errors.Is(err, ErrPeerNotFound):
 		httpx.Error(c, httpx.NotFound("That user does not exist."))
-	case errors.Is(err, ErrForbidden):
+	case errors.Is(err, ErrForbidden), errors.Is(err, ErrPinForbidden):
 		httpx.Error(c, httpx.Forbidden("You do not have permission to do that."))
+	case errors.Is(err, ErrMessageNotFound), errors.Is(err, ErrCannotEditDeleted):
+		httpx.Error(c, httpx.NotFound("That message is no longer available."))
+	case errors.Is(err, ErrEditWindowClosed):
+		httpx.Error(c, httpx.Forbidden("This message can no longer be edited."))
+	case errors.Is(err, ErrNotEditableType), errors.Is(err, ErrNotForwardable), errors.Is(err, ErrNotReactable):
+		httpx.Error(c, httpx.Validation("That action is not available for this message.",
+			gin.H{"fields": map[string]string{"message_id": "Unsupported for this message."}}))
+	case errors.Is(err, ErrInvalidEmoji):
+		httpx.Error(c, httpx.Validation("Please fix the highlighted fields.",
+			gin.H{"fields": map[string]string{"emoji": "Invalid reaction."}}))
+	case errors.Is(err, ErrEmptySearch):
+		httpx.Error(c, httpx.Validation("Enter something to search for.",
+			gin.H{"fields": map[string]string{"q": "A search query is required."}}))
 	case errors.Is(err, ErrOwnerImmutable):
 		httpx.Error(c, httpx.Forbidden("The group owner cannot be changed."))
 	case errors.Is(err, ErrNotConnected):
@@ -266,7 +288,7 @@ func (h *Handler) ListMessages(c *gin.Context) {
 
 	resp := make([]MessageResponse, 0, len(items))
 	for _, m := range items {
-		resp = append(resp, ToMessageResponse(m))
+		resp = append(resp, ToMessageResponseFor(m, user.ID))
 	}
 	httpx.OK(c, httpx.NewPaginated(resp, next))
 }
@@ -293,10 +315,10 @@ func (h *Handler) SendMessage(c *gin.Context) {
 
 	if duplicate {
 		// The message already existed; return it without claiming a new one.
-		httpx.OK(c, ToMessageResponse(msg))
+		httpx.OK(c, ToMessageResponseFor(msg, user.ID))
 		return
 	}
-	httpx.Created(c, ToMessageResponse(msg))
+	httpx.Created(c, ToMessageResponseFor(msg, user.ID))
 }
 
 // MarkRead handles POST /conversations/:id/read.
@@ -498,4 +520,235 @@ func (h *Handler) LeaveGroup(c *gin.Context) {
 		return
 	}
 	httpx.NoContent(c)
+}
+
+// --- advanced messaging (Phase 4) -------------------------------------------
+
+// EditMessage handles PATCH /conversations/:id/messages/:messageId.
+func (h *Handler) EditMessage(c *gin.Context) {
+	id, ok := parseID(c, "id", "Conversation not found.")
+	if !ok {
+		return
+	}
+	messageID, ok := parseID(c, "messageId", "Message not found.")
+	if !ok {
+		return
+	}
+	var body editMessageInput
+	if err := httpx.BindJSON(c, &body); err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	if fields := body.Validate(); len(fields) > 0 {
+		httpx.Error(c, httpx.Validation("Please fix the highlighted fields.",
+			gin.H{"fields": fields}))
+		return
+	}
+
+	user, _ := auth.CurrentUser(c)
+	msg, err := h.svc.EditMessage(c.Request.Context(), user.ID, id, messageID, body.Text)
+	if err != nil {
+		writeError(c, err, "Conversation not found.")
+		return
+	}
+	httpx.OK(c, ToMessageResponseFor(msg, user.ID))
+}
+
+// DeleteMessage handles DELETE /conversations/:id/messages/:messageId.
+func (h *Handler) DeleteMessage(c *gin.Context) {
+	id, ok := parseID(c, "id", "Conversation not found.")
+	if !ok {
+		return
+	}
+	messageID, ok := parseID(c, "messageId", "Message not found.")
+	if !ok {
+		return
+	}
+	user, _ := auth.CurrentUser(c)
+	msg, err := h.svc.DeleteMessage(c.Request.Context(), user.ID, id, messageID)
+	if err != nil {
+		writeError(c, err, "Conversation not found.")
+		return
+	}
+	httpx.OK(c, ToMessageResponseFor(msg, user.ID))
+}
+
+// SearchMessages handles GET /conversations/:id/messages/search.
+func (h *Handler) SearchMessages(c *gin.Context) {
+	id, ok := parseID(c, "id", "Conversation not found.")
+	if !ok {
+		return
+	}
+	query := c.Query("q")
+	if strings.TrimSpace(query) == "" {
+		httpx.Error(c, httpx.Validation("Enter something to search for.",
+			gin.H{"fields": map[string]string{"q": "A search query is required."}}))
+		return
+	}
+	if len([]rune(query)) > maxSearchQueryLength {
+		httpx.Error(c, httpx.Validation("Please fix the highlighted fields.",
+			gin.H{"fields": map[string]string{"q": "Search query is too long."}}))
+		return
+	}
+
+	var before *int64
+	if raw := strings.TrimSpace(c.Query("before")); raw != "" {
+		n, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || n < 0 {
+			httpx.Error(c, httpx.Validation("Please fix the highlighted fields.",
+				gin.H{"fields": map[string]string{"before": "before must be a non-negative integer."}}))
+			return
+		}
+		before = &n
+	}
+	limit := 0
+	if raw := strings.TrimSpace(c.Query("limit")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			httpx.Error(c, httpx.Validation("Please fix the highlighted fields.",
+				gin.H{"fields": map[string]string{"limit": "limit must be a positive integer."}}))
+			return
+		}
+		limit = n
+	}
+
+	user, _ := auth.CurrentUser(c)
+	items, next, err := h.svc.SearchMessages(c.Request.Context(), user.ID, id, query, before, limit)
+	if err != nil {
+		writeError(c, err, "Conversation not found.")
+		return
+	}
+	resp := make([]MessageResponse, 0, len(items))
+	for _, m := range items {
+		resp = append(resp, ToMessageResponseFor(m, user.ID))
+	}
+	httpx.OK(c, httpx.NewPaginated(resp, next))
+}
+
+// ForwardMessage handles POST /conversations/:id/messages/forward, where :id is
+// the destination conversation and the body names the source.
+func (h *Handler) ForwardMessage(c *gin.Context) {
+	id, ok := parseID(c, "id", "Conversation not found.")
+	if !ok {
+		return
+	}
+	var body forwardInput
+	if err := httpx.BindJSON(c, &body); err != nil {
+		httpx.Error(c, err)
+		return
+	}
+	if fields := body.Validate(); len(fields) > 0 {
+		httpx.Error(c, httpx.Validation("Please fix the highlighted fields.",
+			gin.H{"fields": fields}))
+		return
+	}
+	source, _ := uuid.Parse(body.SourceConversationID)
+	messageID, _ := uuid.Parse(body.MessageID)
+
+	user, _ := auth.CurrentUser(c)
+	msg, err := h.svc.ForwardMessage(c.Request.Context(), user.ID, id, source, messageID)
+	if err != nil {
+		writeError(c, err, "Conversation not found.")
+		return
+	}
+	httpx.Created(c, ToMessageResponseFor(msg, user.ID))
+}
+
+// AddReaction handles PUT /conversations/:id/messages/:messageId/reactions.
+func (h *Handler) AddReaction(c *gin.Context) { h.setReaction(c, true) }
+
+// RemoveReaction handles DELETE /conversations/:id/messages/:messageId/reactions,
+// reading the emoji from the `emoji` query parameter.
+func (h *Handler) RemoveReaction(c *gin.Context) { h.setReaction(c, false) }
+
+func (h *Handler) setReaction(c *gin.Context, add bool) {
+	id, ok := parseID(c, "id", "Conversation not found.")
+	if !ok {
+		return
+	}
+	messageID, ok := parseID(c, "messageId", "Message not found.")
+	if !ok {
+		return
+	}
+
+	var emoji string
+	if add {
+		var body reactionInput
+		if err := httpx.BindJSON(c, &body); err != nil {
+			httpx.Error(c, err)
+			return
+		}
+		if fields := body.Validate(); len(fields) > 0 {
+			httpx.Error(c, httpx.Validation("Please fix the highlighted fields.",
+				gin.H{"fields": fields}))
+			return
+		}
+		emoji = body.Emoji
+	} else {
+		input := reactionInput{Emoji: c.Query("emoji")}
+		if fields := input.Validate(); len(fields) > 0 {
+			httpx.Error(c, httpx.Validation("Please fix the highlighted fields.",
+				gin.H{"fields": fields}))
+			return
+		}
+		emoji = input.Emoji
+	}
+
+	user, _ := auth.CurrentUser(c)
+	var (
+		reactions []ReactionResponse
+		err       error
+	)
+	if add {
+		reactions, err = h.svc.AddReaction(c.Request.Context(), user.ID, id, messageID, emoji)
+	} else {
+		reactions, err = h.svc.RemoveReaction(c.Request.Context(), user.ID, id, messageID, emoji)
+	}
+	if err != nil {
+		writeError(c, err, "Conversation not found.")
+		return
+	}
+	httpx.OK(c, gin.H{"message_id": messageID.String(), "reactions": reactions})
+}
+
+// PinMessage handles PUT /conversations/:id/messages/:messageId/pin.
+func (h *Handler) PinMessage(c *gin.Context) { h.setPin(c, true) }
+
+// UnpinMessage handles DELETE /conversations/:id/messages/:messageId/pin.
+func (h *Handler) UnpinMessage(c *gin.Context) { h.setPin(c, false) }
+
+func (h *Handler) setPin(c *gin.Context, pinned bool) {
+	id, ok := parseID(c, "id", "Conversation not found.")
+	if !ok {
+		return
+	}
+	messageID, ok := parseID(c, "messageId", "Message not found.")
+	if !ok {
+		return
+	}
+	user, _ := auth.CurrentUser(c)
+	if err := h.svc.SetPin(c.Request.Context(), user.ID, id, messageID, pinned); err != nil {
+		writeError(c, err, "Conversation not found.")
+		return
+	}
+	httpx.NoContent(c)
+}
+
+// ListPins handles GET /conversations/:id/pins.
+func (h *Handler) ListPins(c *gin.Context) {
+	id, ok := parseID(c, "id", "Conversation not found.")
+	if !ok {
+		return
+	}
+	user, _ := auth.CurrentUser(c)
+	items, err := h.svc.PinnedMessages(c.Request.Context(), user.ID, id)
+	if err != nil {
+		writeError(c, err, "Conversation not found.")
+		return
+	}
+	resp := make([]MessageResponse, 0, len(items))
+	for _, m := range items {
+		resp = append(resp, ToMessageResponseFor(m, user.ID))
+	}
+	httpx.OK(c, gin.H{"messages": resp})
 }

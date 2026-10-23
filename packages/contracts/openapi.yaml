@@ -349,6 +349,389 @@ paths:
         "429":
           $ref: "#/components/responses/Error"
 
+  /api/v1/conversations/{id}/messages/search:
+    get:
+      tags: [Messaging]
+      summary: Search messages in a conversation
+      description: >
+        Case-insensitive substring search over the caller's authorized
+        conversations' message bodies. Only messages the caller can already
+        read are returned; the query never crosses a conversation boundary.
+        Deleted messages are excluded.
+      operationId: searchMessages
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: q
+          in: query
+          required: true
+          description: Search term (1-100 characters).
+          schema:
+            type: string
+            minLength: 1
+            maxLength: 100
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+        - name: before
+          in: query
+          description: Return hits with a sequence strictly below this value.
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "200":
+          description: A page of matching messages, newest first.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        allOf:
+                          - $ref: "#/components/schemas/CursorPage"
+                          - type: object
+                            properties:
+                              items:
+                                type: array
+                                items:
+                                  $ref: "#/components/schemas/Message"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/conversations/{id}/messages/forward:
+    post:
+      tags: [Messaging]
+      summary: Forward a message into a conversation
+      description: >
+        Copies a message the caller can read into the conversation named by
+        `{id}` and returns the new copy. The copy keeps the original
+        `message_type` and `content` and records `forwarded_from`. The caller
+        must be a member of the destination conversation. System messages
+        cannot be forwarded.
+      operationId: forwardMessage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Destination conversation id.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForwardMessageRequest"
+      responses:
+        "201":
+          description: The forwarded copy.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Message"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/conversations/{id}/messages/{messageId}:
+    patch:
+      tags: [Messaging]
+      summary: Edit a message
+      description: >
+        Replaces the body of a text message the caller sent. The edit window
+        is 15 minutes from creation. Deleted messages and non-text messages
+        cannot be edited. Group owners and administrators may not edit other
+        people's messages.
+      operationId: editMessage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: messageId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EditMessageRequest"
+      responses:
+        "200":
+          description: The edited message.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Message"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+        "409":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Messaging]
+      summary: Delete a message
+      description: >
+        Soft-deletes a message for everyone: the body is scrubbed and the
+        message is replaced by a tombstone. The caller must be the sender; in
+        a group, owners and administrators may also delete other members'
+        messages.
+      operationId: deleteMessage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: messageId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The tombstoned message.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        $ref: "#/components/schemas/Message"
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/conversations/{id}/messages/{messageId}/reactions:
+    put:
+      tags: [Messaging]
+      summary: React to a message
+      description: >
+        Adds the caller's reaction with the given emoji. Reacting twice with
+        the same emoji is a no-op. Returns the full aggregate for the message
+        as seen by the caller, so clients can recompute the chips.
+      operationId: addReaction
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: messageId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ReactionRequest"
+      responses:
+        "200":
+          description: The reaction aggregate.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          message_id: { type: string, format: uuid }
+                          reactions:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/ReactionResponse"
+                        required: [message_id, reactions]
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Messaging]
+      summary: Remove a reaction
+      description: >
+        Removes the caller's reaction with the given emoji. The emoji is read
+        from the `emoji` query parameter.
+      operationId: removeReaction
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: messageId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: emoji
+          in: query
+          required: true
+          schema:
+            type: string
+            maxLength: 16
+      responses:
+        "200":
+          description: The reaction aggregate.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          message_id: { type: string, format: uuid }
+                          reactions:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/ReactionResponse"
+                        required: [message_id, reactions]
+        "404":
+          $ref: "#/components/responses/Error"
+        "422":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/conversations/{id}/messages/{messageId}/pin:
+    put:
+      tags: [Messaging]
+      summary: Pin a message
+      description: >
+        Pins a message so it appears in the conversation's pinned list. In a
+        group, only owners and administrators may pin.
+      operationId: pinMessage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: messageId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The message is pinned.
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+    delete:
+      tags: [Messaging]
+      summary: Unpin a message
+      description: Removes a message from the conversation's pinned list.
+      operationId: unpinMessage
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: messageId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "204":
+          description: The message is no longer pinned.
+        "403":
+          $ref: "#/components/responses/Error"
+        "404":
+          $ref: "#/components/responses/Error"
+
+  /api/v1/conversations/{id}/pins:
+    get:
+      tags: [Messaging]
+      summary: List pinned messages
+      description: >
+        Returns the conversation's pinned messages, newest pin first.
+      operationId: listPins
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: The pinned messages.
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: "#/components/schemas/DataEnvelope"
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          messages:
+                            type: array
+                            items:
+                              $ref: "#/components/schemas/Message"
+                        required: [messages]
+        "404":
+          $ref: "#/components/responses/Error"
+
   /api/v1/conversations/{id}/read:
     post:
       tags: [Messaging]
@@ -1286,7 +1669,48 @@ components:
         created_at: { type: string, format: date-time }
         edited_at: { type: [string, "null"], format: date-time }
         deleted_at: { type: [string, "null"], format: date-time }
-      required: [id, conversation_id, sender_id, sequence_no, message_type, content, status, created_at]
+        reply_to:
+          description: The quoted message, when this message is a reply.
+          type: [object, "null"]
+          properties:
+            id: { type: string, format: uuid }
+            sender_id: { type: string, format: uuid }
+            message_type: { type: string }
+            content: { type: object }
+            deleted: { type: boolean }
+            text:
+              type: string
+              description: Plain-text preview of the quoted body.
+          required: [id, sender_id, message_type, content, deleted, text]
+        forwarded_from:
+          description: Id of the original message when this message is a forward.
+          type: [string, "null"]
+          format: uuid
+        pinned_at:
+          description: When the message was pinned; null when it is not pinned.
+          type: [string, "null"]
+          format: date-time
+        reactions:
+          description: Per-emoji reaction aggregates, as seen by the requesting user.
+          type: array
+          items:
+            $ref: "#/components/schemas/ReactionResponse"
+      required:
+        [id, conversation_id, sender_id, sequence_no, message_type, content, status, created_at, reply_to, forwarded_from, pinned_at, reactions]
+
+    ReactionResponse:
+      description: One emoji's aggregate reaction on a message.
+      type: object
+      properties:
+        emoji: { type: string }
+        count: { type: integer, minimum: 0 }
+        mine:
+          type: boolean
+          description: True when the requesting user reacted with this emoji.
+        users:
+          type: array
+          items: { type: string, format: uuid }
+      required: [emoji, count, mine, users]
 
     MomentAuthor:
       description: Public profile of a moment or comment author.
@@ -1386,7 +1810,49 @@ components:
         content:
           type: object
           description: Body matching `message_type`.
+        reply_to_id:
+          type: string
+          format: uuid
+          description: >
+            Optional id of an earlier message in the same conversation to
+            quote. The quoted message must exist in that conversation.
       required: [client_msg_id, content]
+
+    EditMessageRequest:
+      type: object
+      description: Body of PATCH /api/v1/conversations/{id}/messages/{messageId}.
+      properties:
+        text:
+          type: string
+          minLength: 1
+          maxLength: 4000
+          description: The replacement body.
+      required: [text]
+
+    ForwardMessageRequest:
+      type: object
+      description: Body of POST /api/v1/conversations/{id}/messages/forward.
+      properties:
+        source_conversation_id:
+          type: string
+          format: uuid
+          description: Conversation the original message belongs to.
+        message_id:
+          type: string
+          format: uuid
+          description: Id of the message to forward.
+      required: [source_conversation_id, message_id]
+
+    ReactionRequest:
+      type: object
+      description: Body of PUT /api/v1/conversations/{id}/messages/{messageId}/reactions.
+      properties:
+        emoji:
+          type: string
+          minLength: 1
+          maxLength: 16
+          description: The emoji to react with.
+      required: [emoji]
 
     CreateMomentRequest:
       type: object

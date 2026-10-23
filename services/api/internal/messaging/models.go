@@ -61,10 +61,24 @@ type Message struct {
 	EditedAt       *time.Time
 	DeletedAt      *time.Time
 
+	// Phase 4: advanced-messaging metadata.
+	ReplyToID     *uuid.UUID
+	ReplyTo       *Message
+	ForwardedFrom *uuid.UUID
+	PinnedAt      *time.Time
+	Reactions     []Reaction
+
 	// Status is computed per requesting viewer, not stored: for the sender it
 	// reflects the recipient's acknowledged read/delivered sequence; for anyone
 	// else it reflects their own.
 	Status string
+}
+
+// Reaction is one user's emoji reaction on a message.
+type Reaction struct {
+	MessageID uuid.UUID
+	UserID    uuid.UUID
+	Emoji     string
 }
 
 // ProfileBrief is the minimal public profile needed to render a peer.

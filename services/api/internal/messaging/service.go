@@ -2,6 +2,7 @@ package messaging
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strconv"
@@ -48,6 +49,17 @@ type store interface {
 	RemoveMember(ctx context.Context, id, userID uuid.UUID) (bool, error)
 	SetMemberRole(ctx context.Context, id, userID uuid.UUID, role string) (bool, error)
 	LeaveGroup(ctx context.Context, id, userID uuid.UUID) (bool, *uuid.UUID, error)
+	// Advanced messaging (Phase 4).
+	MessageFor(ctx context.Context, conversationID, messageID uuid.UUID) (Message, error)
+	MessagesByIDs(ctx context.Context, ids []uuid.UUID) (map[uuid.UUID]Message, error)
+	EditMessage(ctx context.Context, messageID uuid.UUID, content json.RawMessage, editedAt time.Time) (Message, error)
+	SoftDeleteMessage(ctx context.Context, messageID uuid.UUID, deletedAt time.Time) error
+	AddReaction(ctx context.Context, messageID, userID uuid.UUID, emoji string) (bool, error)
+	RemoveReaction(ctx context.Context, messageID, userID uuid.UUID, emoji string) (bool, error)
+	ReactionsFor(ctx context.Context, messageIDs []uuid.UUID) (map[uuid.UUID][]Reaction, error)
+	PinMessage(ctx context.Context, messageID uuid.UUID, pinnedAt *time.Time) error
+	PinnedMessages(ctx context.Context, conversationID uuid.UUID) ([]Message, error)
+	SearchMessages(ctx context.Context, conversationID, viewer uuid.UUID, pattern string, before *int64, limit int) ([]Message, bool, error)
 }
 
 // Page-size bounds for message history.
@@ -55,6 +67,9 @@ const (
 	defaultPageLimit = 50
 	maxPageLimit     = 200
 )
+
+// editWindow is how long after sending a text message may still be edited.
+const editWindow = 15 * time.Minute
 
 // Service is the messaging use-case layer shared by the REST handlers and the
 // realtime transport. It owns authorization, validation, and fan-out.
@@ -175,6 +190,7 @@ func (s *Service) ListMessages(ctx context.Context, me, conversationID uuid.UUID
 	if err != nil {
 		return nil, "", err
 	}
+	items = s.hydrate(ctx, items)
 
 	next := ""
 	if hasMore && len(items) > 0 {
@@ -185,6 +201,80 @@ func (s *Service) ListMessages(ctx context.Context, me, conversationID uuid.UUID
 		}
 	}
 	return items, next, nil
+}
+
+// ensureMember returns ErrConversationNotFound when the caller is not a member,
+// so membership cannot be probed through a message endpoint.
+func (s *Service) ensureMember(ctx context.Context, conversationID, me uuid.UUID) error {
+	member, err := s.store.IsMember(ctx, conversationID, me)
+	if err != nil {
+		return err
+	}
+	if !member {
+		return ErrConversationNotFound
+	}
+	return nil
+}
+
+// hydrate attaches reply previews and reaction aggregates to a page of
+// messages. Reply targets are batch-loaded (one query) and reactions for the
+// whole page (one query), so a page costs two extra queries regardless of size.
+func (s *Service) hydrate(ctx context.Context, msgs []Message) []Message {
+	if len(msgs) == 0 {
+		return msgs
+	}
+	ids := make([]uuid.UUID, 0, len(msgs))
+	replyIDs := make([]uuid.UUID, 0, len(msgs))
+	seen := make(map[uuid.UUID]bool, len(msgs))
+	for i := range msgs {
+		ids = append(ids, msgs[i].ID)
+		if msgs[i].ReplyToID != nil && !seen[*msgs[i].ReplyToID] {
+			seen[*msgs[i].ReplyToID] = true
+			replyIDs = append(replyIDs, *msgs[i].ReplyToID)
+		}
+	}
+	if len(replyIDs) > 0 {
+		if originals, err := s.store.MessagesByIDs(ctx, replyIDs); err == nil {
+			for i := range msgs {
+				if msgs[i].ReplyToID == nil {
+					continue
+				}
+				if original, ok := originals[*msgs[i].ReplyToID]; ok {
+					o := original
+					msgs[i].ReplyTo = &o
+				}
+			}
+		}
+	}
+	if reactions, err := s.store.ReactionsFor(ctx, ids); err == nil {
+		for i := range msgs {
+			if rs, ok := reactions[msgs[i].ID]; ok {
+				msgs[i].Reactions = rs
+			}
+		}
+	}
+	return msgs
+}
+
+// hydrateOne hydrates a single message (used after send/edit/forward).
+func (s *Service) hydrateOne(ctx context.Context, m Message) Message {
+	hydrated := s.hydrate(ctx, []Message{m})
+	return hydrated[0]
+}
+
+// broadcast publishes an event to every member of a conversation. The actor is
+// included: their own client merges by message id, and their other tabs need it.
+func (s *Service) broadcast(ctx context.Context, conversationID uuid.UUID, event any) {
+	if s.pub == nil {
+		return
+	}
+	members, err := s.store.MemberIDs(ctx, conversationID)
+	if err != nil {
+		return
+	}
+	for _, member := range members {
+		s.pub.PublishToUser(member, event)
+	}
 }
 
 // SyncMessages returns messages strictly newer than `after`, oldest-first, for a
@@ -203,17 +293,28 @@ func (s *Service) SendMessage(ctx context.Context, me, conversationID uuid.UUID,
 		return Message{}, false, &ValidationError{Fields: fields}
 	}
 
-	member, err := s.store.IsMember(ctx, conversationID, me)
-	if err != nil {
+	if err := s.ensureMember(ctx, conversationID, me); err != nil {
 		return Message{}, false, err
-	}
-	if !member {
-		return Message{}, false, ErrConversationNotFound
 	}
 
 	members, err := s.store.MemberIDs(ctx, conversationID)
 	if err != nil {
 		return Message{}, false, err
+	}
+
+	// Resolve an optional reply target, scoped to this conversation.
+	var replyTo *uuid.UUID
+	if in.ReplyToID != "" {
+		rid, _ := uuid.Parse(in.ReplyToID)
+		if _, err := s.store.MessageFor(ctx, conversationID, rid); err != nil {
+			if errors.Is(err, ErrMessageNotFound) {
+				return Message{}, false, &ValidationError{Fields: map[string]string{
+					"reply_to_id": "That message does not exist in this conversation.",
+				}}
+			}
+			return Message{}, false, err
+		}
+		replyTo = &rid
 	}
 
 	clientID := in.ClientMsgID
@@ -223,13 +324,10 @@ func (s *Service) SendMessage(ctx context.Context, me, conversationID uuid.UUID,
 		ClientMsgID:    &clientID,
 		MessageType:    in.MessageType,
 		Content:        in.Content,
+		ReplyToID:      replyTo,
 	})
 	if err != nil {
 		return Message{}, false, err
-	}
-
-	if !duplicate {
-		s.fanOutCreated(ctx, conversationID, msg, members, me)
 	}
 
 	// Compute the sender's own view of the new message for the REST response.
@@ -237,6 +335,11 @@ func (s *Service) SendMessage(ctx context.Context, me, conversationID uuid.UUID,
 		msg.Status = status
 	} else {
 		msg.Status = StatusSent
+	}
+	msg = s.hydrateOne(ctx, msg)
+
+	if !duplicate {
+		s.fanOutCreated(ctx, conversationID, msg, members, me)
 	}
 	return msg, duplicate, nil
 }
@@ -259,7 +362,7 @@ func (s *Service) fanOutCreated(ctx context.Context, conversationID uuid.UUID, m
 			Type:           EventMessageCreated,
 			EventID:        uuid.NewString(),
 			ConversationID: conversationID.String(),
-			Message:        ToMessageResponse(view),
+			Message:        ToMessageResponseFor(view, member),
 		})
 		if connected && member != sender {
 			delivered = append(delivered, member)
@@ -799,4 +902,291 @@ func joinNames(names []string) string {
 		}
 		return out
 	}
+}
+
+// --- advanced messaging (Phase 4) -------------------------------------------
+
+// broadcastViewer publishes one event per member, letting the payload depend on
+// the recipient (used where a field such as reaction "mine" is viewer-relative).
+func (s *Service) broadcastViewer(ctx context.Context, conversationID uuid.UUID, makeEvent func(viewer uuid.UUID) any) {
+	if s.pub == nil {
+		return
+	}
+	members, err := s.store.MemberIDs(ctx, conversationID)
+	if err != nil {
+		return
+	}
+	for _, member := range members {
+		s.pub.PublishToUser(member, makeEvent(member))
+	}
+}
+
+// EditMessage rewrites a text message's body. Only the sender may edit it, only
+// text messages that are not deleted, and only within editWindow of sending.
+func (s *Service) EditMessage(ctx context.Context, me, conversationID, messageID uuid.UUID, text string) (Message, error) {
+	if err := s.ensureMember(ctx, conversationID, me); err != nil {
+		return Message{}, err
+	}
+	msg, err := s.store.MessageFor(ctx, conversationID, messageID)
+	if err != nil {
+		return Message{}, err
+	}
+	if msg.SenderID != me {
+		return Message{}, ErrForbidden
+	}
+	switch {
+	case msg.DeletedAt != nil:
+		return Message{}, ErrCannotEditDeleted
+	case msg.MessageType != MessageTypeText:
+		return Message{}, ErrNotEditableType
+	case s.now().Sub(msg.CreatedAt) > editWindow:
+		return Message{}, ErrEditWindowClosed
+	}
+
+	updated, err := s.store.EditMessage(ctx, messageID, mustMarshal(textContent{Text: text}), s.now())
+	if err != nil {
+		return Message{}, err
+	}
+	updated = s.hydrateOne(ctx, updated)
+	s.broadcastViewer(ctx, conversationID, func(viewer uuid.UUID) any {
+		return MessageUpdatedEvent{
+			Type:           EventMessageUpdated,
+			ConversationID: conversationID.String(),
+			Message:        ToMessageResponseFor(updated, viewer),
+		}
+	})
+	return updated, nil
+}
+
+// DeleteMessage tombstones a message. The sender may always delete their own
+// message; in a group an owner or admin may also delete another member's.
+func (s *Service) DeleteMessage(ctx context.Context, me, conversationID, messageID uuid.UUID) (Message, error) {
+	if err := s.ensureMember(ctx, conversationID, me); err != nil {
+		return Message{}, err
+	}
+	msg, err := s.store.MessageFor(ctx, conversationID, messageID)
+	if err != nil {
+		return Message{}, err
+	}
+	if msg.DeletedAt != nil {
+		return Message{}, ErrMessageNotFound
+	}
+	if msg.SenderID != me {
+		conv, err := s.store.Conversation(ctx, conversationID)
+		if err != nil {
+			return Message{}, err
+		}
+		if conv.Kind != ConversationKindGroup {
+			return Message{}, ErrForbidden
+		}
+		role, err := s.store.MemberRole(ctx, conversationID, me)
+		if err != nil {
+			return Message{}, err
+		}
+		if roleRank(role) < roleRank(RoleAdmin) {
+			return Message{}, ErrForbidden
+		}
+	}
+
+	now := s.now()
+	if err := s.store.SoftDeleteMessage(ctx, messageID, now); err != nil {
+		return Message{}, err
+	}
+	msg.Content = json.RawMessage(`{}`)
+	msg.DeletedAt = &now
+	msg.Reactions = nil
+	msg.ReplyTo = nil
+
+	s.broadcast(ctx, conversationID, MessageDeletedEvent{
+		Type:           EventMessageDeleted,
+		ConversationID: conversationID.String(),
+		MessageID:      messageID.String(),
+		Message:        ToMessageResponse(msg),
+	})
+	return msg, nil
+}
+
+// AddReaction records the caller's emoji reaction on a message and returns the
+// updated aggregate as the caller sees it.
+func (s *Service) AddReaction(ctx context.Context, me, conversationID, messageID uuid.UUID, emoji string) ([]ReactionResponse, error) {
+	return s.setReaction(ctx, me, conversationID, messageID, emoji, true)
+}
+
+// RemoveReaction removes the caller's emoji reaction from a message.
+func (s *Service) RemoveReaction(ctx context.Context, me, conversationID, messageID uuid.UUID, emoji string) ([]ReactionResponse, error) {
+	return s.setReaction(ctx, me, conversationID, messageID, emoji, false)
+}
+
+func (s *Service) setReaction(ctx context.Context, me, conversationID, messageID uuid.UUID, emoji string, add bool) ([]ReactionResponse, error) {
+	if err := s.ensureMember(ctx, conversationID, me); err != nil {
+		return nil, err
+	}
+	msg, err := s.store.MessageFor(ctx, conversationID, messageID)
+	if err != nil {
+		return nil, err
+	}
+	if msg.MessageType == MessageTypeSystem {
+		return nil, ErrNotReactable
+	}
+	if msg.DeletedAt != nil {
+		return nil, ErrMessageNotFound
+	}
+
+	if add {
+		if _, err := s.store.AddReaction(ctx, messageID, me, emoji); err != nil {
+			return nil, err
+		}
+	} else {
+		if _, err := s.store.RemoveReaction(ctx, messageID, me, emoji); err != nil {
+			return nil, err
+		}
+	}
+
+	reactions, err := s.store.ReactionsFor(ctx, []uuid.UUID{messageID})
+	if err != nil {
+		return nil, err
+	}
+	raw := reactions[messageID]
+
+	s.broadcastViewer(ctx, conversationID, func(viewer uuid.UUID) any {
+		return MessageReactionEvent{
+			Type:           EventMessageReaction,
+			ConversationID: conversationID.String(),
+			MessageID:      messageID.String(),
+			ActorID:        me.String(),
+			Reactions:      reactionsResponse(raw, viewer),
+		}
+	})
+	return reactionsResponse(raw, me), nil
+}
+
+// SetPin pins or unpins a message. In a direct conversation either member may
+// pin; in a group the owner or an admin must.
+func (s *Service) SetPin(ctx context.Context, me, conversationID, messageID uuid.UUID, pinned bool) error {
+	if err := s.ensureMember(ctx, conversationID, me); err != nil {
+		return err
+	}
+	msg, err := s.store.MessageFor(ctx, conversationID, messageID)
+	if err != nil {
+		return err
+	}
+	if msg.DeletedAt != nil {
+		return ErrMessageNotFound
+	}
+	conv, err := s.store.Conversation(ctx, conversationID)
+	if err != nil {
+		return err
+	}
+	if conv.Kind == ConversationKindGroup {
+		role, err := s.store.MemberRole(ctx, conversationID, me)
+		if err != nil {
+			return err
+		}
+		if roleRank(role) < roleRank(RoleAdmin) {
+			return ErrPinForbidden
+		}
+	}
+
+	var at *time.Time
+	if pinned {
+		t := s.now()
+		at = &t
+	}
+	if err := s.store.PinMessage(ctx, messageID, at); err != nil {
+		return err
+	}
+
+	s.broadcast(ctx, conversationID, MessagePinnedEvent{
+		Type:           EventMessagePinned,
+		ConversationID: conversationID.String(),
+		MessageID:      messageID.String(),
+		ActorID:        me.String(),
+		Pinned:         pinned,
+	})
+	return nil
+}
+
+// PinnedMessages lists the pinned messages in a conversation the caller is in.
+func (s *Service) PinnedMessages(ctx context.Context, me, conversationID uuid.UUID) ([]Message, error) {
+	if err := s.ensureMember(ctx, conversationID, me); err != nil {
+		return nil, err
+	}
+	msgs, err := s.store.PinnedMessages(ctx, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	return s.hydrate(ctx, msgs), nil
+}
+
+// ForwardMessage copies a message's content into the destination conversation
+// (the :id of the route), recording the origin. The caller must be a member of
+// both conversations and the source must not be deleted.
+func (s *Service) ForwardMessage(ctx context.Context, me, targetID, sourceID, messageID uuid.UUID) (Message, error) {
+	if err := s.ensureMember(ctx, sourceID, me); err != nil {
+		return Message{}, err
+	}
+	if err := s.ensureMember(ctx, targetID, me); err != nil {
+		return Message{}, err
+	}
+	src, err := s.store.MessageFor(ctx, sourceID, messageID)
+	if err != nil {
+		return Message{}, err
+	}
+	if src.DeletedAt != nil {
+		return Message{}, ErrCannotForwardDeleted
+	}
+	if src.MessageType == MessageTypeSystem {
+		return Message{}, ErrNotForwardable
+	}
+
+	origin := src.ID
+	msg, _, err := s.store.InsertMessage(ctx, InsertMessageParams{
+		ConversationID: targetID,
+		SenderID:       me,
+		MessageType:    src.MessageType,
+		Content:        src.Content,
+		ForwardedFrom:  &origin,
+	})
+	if err != nil {
+		return Message{}, err
+	}
+
+	if status, err := s.store.StatusFor(ctx, targetID, me, me, msg.SequenceNo); err == nil {
+		msg.Status = status
+	} else {
+		msg.Status = StatusSent
+	}
+	msg = s.hydrateOne(ctx, msg)
+
+	members, err := s.store.MemberIDs(ctx, targetID)
+	if err == nil {
+		s.fanOutCreated(ctx, targetID, msg, members, me)
+	}
+	return msg, nil
+}
+
+// SearchMessages finds text messages in a conversation matching a query. It
+// returns matches in ascending sequence order and the `before` cursor (a
+// sequence number, as a string) for loading older matches.
+func (s *Service) SearchMessages(ctx context.Context, me, conversationID uuid.UUID, query string, before *int64, limit int) ([]Message, string, error) {
+	if err := s.ensureMember(ctx, conversationID, me); err != nil {
+		return nil, "", err
+	}
+	q := trimSpace(query)
+	if q == "" {
+		return nil, "", ErrEmptySearch
+	}
+	limit = clampLimit(limit)
+
+	items, hasMore, err := s.store.SearchMessages(ctx, conversationID, me, "%"+escapeLike(q)+"%", before, limit)
+	if err != nil {
+		return nil, "", err
+	}
+	items = s.hydrate(ctx, items)
+
+	next := ""
+	if hasMore && len(items) > 0 {
+		next = strconv.FormatInt(items[0].SequenceNo, 10)
+	}
+	return items, next, nil
 }
